@@ -63,7 +63,7 @@ int ParseKeyName(const std::wstring& raw) {
 
 bool Tuning::Identity() const {
     return fovAdd == 0 && distMul == 1 && posAdd[0] == 0 && posAdd[1] == 0 && posAdd[2] == 0 && targetAdd[0] == 0 &&
-           targetAdd[1] == 0 && targetAdd[2] == 0;
+           targetAdd[1] == 0 && targetAdd[2] == 0 && jump == 1;
 }
 
 // A slider position as Mod Settings Menu saved it in ModMenuConfig\cameraplus.ini, -1 if not saved.

@@ -14,17 +14,20 @@
 
 namespace cp {
 
-// Styles: changes to the game's own camera (distance is a multiple of the game's, the rest are added).
+// Styles: changes to the game's own camera (distance is a multiple of the game's, the rest are added). The jump
+// camera keeps part of the game's jump set (it drops the camera and aims lower while in the air): each style's keeps
+// the game's jump framing at its distance (in the close camera a jump would otherwise climb twice as far up the
+// screen).
 struct Style {
     const char* name;
-    float distMul, side, height, fov;  // side = position X, height = look-at height
+    float distMul, side, height, fov, jump;  // side = position X, height = look-at height
 };
 static const Style kStyles[] = {
-    {"Game default", 1.00f, 0.00f, 0.00f, 0.f},
-    {"Over the shoulder", 0.70f, 0.45f, -0.05f, 0.f},
-    {"Close shoulder", 0.50f, 0.55f, -0.10f, -4.f},
-    {"Cinematic", 1.15f, 0.25f, -0.15f, -8.f},
-    {"Zoom", 0.40f, 0.50f, -0.05f, -15.f},
+    {"Game default", 1.00f, 0.00f, 0.00f, 0.f, 1.0f},
+    {"Over the shoulder", 0.70f, 0.45f, -0.05f, 0.f, 0.7f},
+    {"Close shoulder", 0.50f, 0.55f, -0.10f, -4.f, 0.5f},
+    {"Cinematic", 1.15f, 0.25f, -0.15f, -8.f, 1.0f},
+    {"Zoom", 0.40f, 0.50f, -0.05f, -15.f, 0.4f},
 };
 static const int kStyleCount = (int)(sizeof(kStyles) / sizeof(kStyles[0]));
 static const char* kViewNames[kViewCount] = {"Exploration", "Combat", "Zoom", "Idle"};
@@ -62,7 +65,13 @@ Tuning StyleTuning(int s) {
     t.posAdd[0] = kStyles[s].side;
     t.targetAdd[1] = kStyles[s].height;
     t.fovAdd = kStyles[s].fov;
+    t.jump = kStyles[s].jump;
     return t;
+}
+
+float JumpForDistance(float distMul) {
+    if (!(distMul > 0)) return 1.f;
+    return std::min(1.f, std::max(0.f, roundf(distMul * 10.f) / 10.f));
 }
 
 // The idle camera's starting change: the game's own idle set against its walking set (distance 1.62 -> 1.30,
@@ -76,10 +85,11 @@ Tuning DefaultView(int v) {
     return t;
 }
 
-// b on top of a: distances multiply, the rest add.
+// b on top of a: distances and the jump camera multiply, the rest add.
 static Tuning Combine(const Tuning& a, const Tuning& b) {
     Tuning t;
     t.distMul = a.distMul * b.distMul;
+    t.jump = a.jump * b.jump;
     t.fovAdd = a.fovAdd + b.fovAdd;
     for (int i = 0; i < 3; ++i) {
         t.posAdd[i] = a.posAdd[i] + b.posAdd[i];
@@ -90,7 +100,7 @@ static Tuning Combine(const Tuning& a, const Tuning& b) {
 
 static bool Near(float a, float b) { return fabsf(a - b) < 1e-3f; }
 static bool SameTuning(const Tuning& a, const Tuning& b) {
-    if (!Near(a.fovAdd, b.fovAdd) || !Near(a.distMul, b.distMul)) return false;
+    if (!Near(a.fovAdd, b.fovAdd) || !Near(a.distMul, b.distMul) || !Near(a.jump, b.jump)) return false;
     for (int i = 0; i < 3; ++i)
         if (!Near(a.posAdd[i], b.posAdd[i]) || !Near(a.targetAdd[i], b.targetAdd[i])) return false;
     return true;
@@ -119,8 +129,8 @@ void SetView(int v, const Tuning& t) {
     g_views[v] = t;
     if (v == kCombat) g_combatFollows = false;
     const Tuning& n = g_views[v];
-    Log("%s camera: dist x%.3f side %+.2f posY %+.2f posZ %+.2f look-at %+.2f fov %+.1f", kViewNames[v], n.distMul,
-        n.posAdd[0], n.posAdd[1], n.posAdd[2], n.targetAdd[1], n.fovAdd);
+    Log("%s camera: dist x%.3f side %+.2f posY %+.2f posZ %+.2f look-at %+.2f fov %+.1f jump %.0f%%", kViewNames[v],
+        n.distMul, n.posAdd[0], n.posAdd[1], n.posAdd[2], n.targetAdd[1], n.fovAdd, n.jump * 100);
     ReleaseSRWLockExclusive(&g_lock);
 }
 
@@ -295,6 +305,9 @@ void LoadViews() {
         t.targetAdd[0] = ReadF(s, L"TargetX", d.targetAdd[0], -5, 5);
         t.targetAdd[1] = ReadF(s, L"TargetY", d.targetAdd[1], -5, 5);
         t.targetAdd[2] = ReadF(s, L"TargetZ", d.targetAdd[2], -5, 5);
+        // Cameras saved before 1.1.0 have no jump camera: the one that keeps the game's jump framing at their distance
+        // (a saved style then still matches). Idle's is a change on top of exploration's.
+        t.jump = ReadF(s, L"JumpCamera", v == kIdle ? d.jump : JumpForDistance(t.distMul), 0, 1);
     }
     g_combatFollows = ReadInt(L"Combat", L"SameAsExploration", 0) != 0;
     if (g_combatFollows) g_views[kCombat] = g_views[kExploration];
@@ -336,6 +349,7 @@ void SaveViews() {
         put(L"TargetX", t.targetAdd[0]);
         put(L"TargetY", t.targetAdd[1]);
         put(L"TargetZ", t.targetAdd[2]);
+        put(L"JumpCamera", t.jump);
     }
     WritePrivateProfileStringW(L"Combat", L"SameAsExploration", follows ? L"1" : L"0", ini.c_str());
     wchar_t b[16];

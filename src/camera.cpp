@@ -53,7 +53,10 @@ struct Slot {
     bool valid = false;     // raw/mod hold the target's game values and what we wrote over them
     float raw[kN], mod[kN];
     int32_t rawSet = -1;    // the set id raw was taken from
+    float ground[kN];       // the game's camera before the last jump (raw, while not jumping)
+    bool groundValid = false;
     int32_t set = -2;       // diagnostics: the set id last logged
+    int32_t move = -1;      // diagnostics: the movement mode last logged
     uint8_t mode = 0xff, state = 0xff;
     int moves = 0;
     int trace = 0;  // diagnostics: ticks left to log after a set switch
@@ -113,12 +116,14 @@ static void Ease() {
     const float k = 1.f - expf(-std::min(dt, 1.f) / tau);
     g_cur.fovAdd = Toward(g_cur.fovAdd, want.fovAdd, k);
     g_cur.distMul = Toward(g_cur.distMul, want.distMul, k);
+    g_cur.jump = Toward(g_cur.jump, want.jump, k);
     for (int i = 0; i < 3; ++i) {
         g_cur.posAdd[i] = Toward(g_cur.posAdd[i], want.posAdd[i], k);
         g_cur.targetAdd[i] = Toward(g_cur.targetAdd[i], want.targetAdd[i], k);
     }
     // Snap the last hair so "off" is exactly the game's camera.
     if (fabsf(g_cur.fovAdd - want.fovAdd) < 1e-3f && fabsf(g_cur.distMul - want.distMul) < 1e-4f &&
+        fabsf(g_cur.jump - want.jump) < 1e-4f &&
         fabsf(g_cur.posAdd[0] - want.posAdd[0]) < 1e-4f && fabsf(g_cur.posAdd[1] - want.posAdd[1]) < 1e-4f &&
         fabsf(g_cur.posAdd[2] - want.posAdd[2]) < 1e-4f && fabsf(g_cur.targetAdd[0] - want.targetAdd[0]) < 1e-4f &&
         fabsf(g_cur.targetAdd[1] - want.targetAdd[1]) < 1e-4f && fabsf(g_cur.targetAdd[2] - want.targetAdd[2]) < 1e-4f)
@@ -174,7 +179,9 @@ static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw) {
     const uint8_t* to = p + od::kTo;
     Log("  set %08x: fov %.4f aspect %.3f dist x%.3f hide %.2f vertical(%.3f %.3f) grounded(%.3f %.3f %.3f) "
         "airborne(%.3f %.3f %.3f)", id, raw[0], F(to, od::pAspect), raw[1], F(to, od::pHide), F(to, od::pVertical),
-        F(to, od::pVertical + 4), F(to, 0xa0), F(to, 0xa4), F(to, 0xa8), F(to, 0xb0), F(to, 0xb4), F(to, 0xb8));
+        F(to, od::pVertical + 4), F(to, od::pGroundedSmooth), F(to, od::pGroundedSmooth + 4),
+        F(to, od::pGroundedSmooth + 8), F(to, od::pAirborneSmooth), F(to, od::pAirborneSmooth + 4),
+        F(to, od::pAirborneSmooth + 8));
     Log("  set %08x: default(%.3f %.3f %.3f) safe(%.3f %.3f %.3f) fallback(%.3f %.3f %.3f) target(%.3f %.3f %.3f)", id,
         raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], raw[13]);
 }
@@ -182,11 +189,13 @@ static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw) {
 static void Diagnose(Slot& s) {
     const uint8_t* p = s.od;
     const int32_t set = *(const int32_t*)(p + od::kSetId);
-    if (set != s.set || p[od::kMode] != s.mode || p[od::kState] != s.state) {
-        Log("set %08x -> %08x  mode %u -> %u  state %u -> %u  switched %u", (uint32_t)s.set, (uint32_t)set, s.mode,
-            p[od::kMode], s.state, p[od::kState], p[od::kSwitched]);
+    const int32_t move = *(const int32_t*)(p + od::kMoveMode);
+    if (set != s.set || p[od::kMode] != s.mode || p[od::kState] != s.state || move != s.move) {
+        Log("set %08x -> %08x  mode %u -> %u  state %u -> %u  move %d -> %d  switched %u", (uint32_t)s.set,
+            (uint32_t)set, s.mode, p[od::kMode], s.state, p[od::kState], s.move, move, p[od::kSwitched]);
+        s.move = move;
         if (set != -1 && s.valid) LogSetOnce(p, (uint32_t)set, s.raw);
-        if (set != -1 && s.set >= 0) {
+        if (set != -1 && s.set >= 0 && set != s.set) {
             // What the new set changes (in our values): every params float that differs from where the blend starts.
             char line[1024];
             int n = sprintf_s(line, "  diff:");
@@ -204,17 +213,18 @@ static void Diagnose(Slot& s) {
         --s.trace;
         const uint8_t* o = p + od::kOut;
         const uint8_t* f = p + od::kFrom;
-        Log("  tick t=%.3f dist game %.3f to %.3f from %.3f out %.3f | side from %.3f out %.3f | look from %.3f out %.3f",
-            F(p, od::kT), s.raw[1], s.mod[1], F(f, od::pDistMul), F(o, od::pDistMul), F(f, od::pDefault),
-            F(o, od::pDefault), F(f, od::pTarget + 4), F(o, od::pTarget + 4));
+        Log("  tick t=%.3f dist game %.3f to %.3f from %.3f out %.3f | camera y game %.3f to %.3f out %.3f | look game "
+            "%.3f to %.3f out %.3f", F(p, od::kT), s.raw[1], s.mod[1], F(f, od::pDistMul), F(o, od::pDistMul), s.raw[3],
+            s.mod[3], F(o, od::pDefault + 4), s.raw[12], s.mod[12], F(o, od::pTarget + 4));
     }
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastSnap >= 5000) {
         g_lastSnap = now;
         const uint8_t* o = p + od::kOut;
-        Log("snap set %08x t=%.2f out: fov %.4f dist x%.3f default(%.3f %.3f %.3f) target(%.3f %.3f %.3f) ease dist x%.3f",
-            (uint32_t)set, F(p, od::kT), F(o, od::pFov), F(o, od::pDistMul), F(o, od::pDefault), F(o, od::pDefault + 4),
-            F(o, od::pDefault + 8), F(o, od::pTarget), F(o, od::pTarget + 4), F(o, od::pTarget + 8), g_cur.distMul);
+        Log("snap set %08x t=%.2f out: fov %.4f dist x%.3f default(%.3f %.3f %.3f) target(%.3f %.3f %.3f) ease dist "
+            "x%.3f jump %.0f%%", (uint32_t)set, F(p, od::kT), F(o, od::pFov), F(o, od::pDistMul), F(o, od::pDefault),
+            F(o, od::pDefault + 4), F(o, od::pDefault + 8), F(o, od::pTarget), F(o, od::pTarget + 4),
+            F(o, od::pTarget + 8), g_cur.distMul, g_cur.jump * 100);
     }
 }
 
@@ -242,7 +252,20 @@ static void ApplyTarget(Slot& s) {
         if (newSet || !Same(v, s.mod[i])) s.raw[i] = v;
     }
     s.rawSet = set;
-    Apply(s.raw, s.mod);
+    // The jump camera: in the air (select_set's movement mode) the game's jump set drops the camera and aims lower
+    // (the walking set's camera +0.25 m, look-at 1.4 m; the jump set's -1.30 m, 1.0 m), which puts the player high on
+    // the screen, the more so the closer the camera. Its field of view, distance and positions are taken only part of
+    // the way from the camera on the ground (the last set before the jump); the rest (auto-pitch, smooth times...)
+    // stays the jump set's.
+    float base[kN];
+    memcpy(base, s.raw, sizeof(base));
+    if (*(const int32_t*)(p + od::kMoveMode) != od::kMoveJump) {
+        memcpy(s.ground, s.raw, sizeof(s.ground));
+        s.groundValid = true;
+    } else if (s.groundValid && g_cur.jump != 1.f) {
+        for (int i = 0; i < kN; ++i) base[i] = s.ground[i] + (s.raw[i] - s.ground[i]) * g_cur.jump;
+    }
+    Apply(base, s.mod);
     for (int i = 0; i < kN; ++i) SetF(to, kFields[i], s.mod[i]);
     s.valid = true;
 }

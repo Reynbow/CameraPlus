@@ -39,6 +39,7 @@ struct Tuning {
     float distMul = 1;       // multiplies the set's distance curve (cameraOffsetDistanceCurveMultiplier)
     float posAdd[3] = {};    // added to the default, safe and fallback camera positions
     float targetAdd[3] = {}; // added to the target offset
+    float jump = 1;          // how much of the game's jump camera to keep (1 = all, 0 = the camera from the ground)
     bool Identity() const;
 };
 struct Config {
@@ -117,6 +118,9 @@ void SetIdleAfter(float s);
 void IdleTick(float add);            // the game's idle timer grew by add this tick (0: restarted)
 int LiveView();
 bool LiveTarget(Tuning& out, float& tau);  // the live camera's tuning and how fast to ease to it (s)
+// The jump camera that keeps the game's jump framing at a distance multiplier: its drop and lower aim are distances
+// in the world, so a camera twice as close keeps half of them (distMul, in 10% steps, at most all of it).
+float JumpForDistance(float distMul);
 std::string KeyName(int vk);
 void LoadViews();
 void SaveViews();
@@ -195,6 +199,11 @@ std::string BuildConfigJs();
 namespace od {
 const size_t kSize = 0x610;
 const size_t kMode = 0x0, kState = 0x1;  // bytes select_set picks the set by (player mode, state)
+// int: the movement the set is for, as select_set picks it each frame (0x1427c3570): the number of the first bit of
+// {1 idle, 2 dodge, 3 dash, 4 jump, 5 sprint, 6 execution/reach, 7 carry, 8..10 lock-on} the state has a set for,
+// else 0. Jump: the Jump component's +0x15 is 2 and +0x14 isn't 4 (in the air after a jump).
+const size_t kMoveMode = 0x4;
+const int kMoveJump = 4;
 const size_t kSetId = 0xc;               // the set blended to (-1 = none yet)
 const size_t kOut = 0x50, kFrom = 0x230, kTo = 0x410;
 const size_t kT = 0x5f0;                 // blend weight of kTo, 0..1
@@ -202,6 +211,7 @@ const size_t kSwitched = 0x5fc;          // select_set switched sets this frame
 const size_t kIdleTime = 0x600;         // update_idle_time: seconds standing still (the idle set at the tweakable)
 // Inside the params block:
 const size_t pSetId = 0x0, pAspect = 0x4, pFov = 0x8, pDistMul = 0x14, pHide = 0x18;
+const size_t pGroundedSmooth = 0xa0, pAirborneSmooth = 0xb0;                   // vec3 (+pad), seconds
 const size_t pDefault = 0xc0, pSafe = 0xd0, pFallback = 0xe0, pTarget = 0xf0;  // vec3 (+pad)
 const size_t pVertical = 0x100;          // verticalAngleRange (vec2)
 }  // namespace od

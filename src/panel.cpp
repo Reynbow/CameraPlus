@@ -42,7 +42,7 @@ struct Locked {
 
 // ---- rows ----
 enum Row { kOnOff, kEditing, kStyle, kDistance, kHeight, kSide, kPosY, kPosZ, kFov, kZoomKeyRow, kZoomModeRow,
-           kResetView, kDump, kIdleOn, kIdleAfter, kZoomPadRow, kRowKinds };
+           kResetView, kDump, kIdleOn, kIdleAfter, kZoomPadRow, kJump, kRowKinds };
 
 // The rows shown for the camera being edited; g_sel is a place in this list.
 static int Rows(int* out) {
@@ -52,7 +52,7 @@ static int Rows(int* out) {
     if (g_edit == kIdle) {
         for (int r : {kIdleOn, kIdleAfter, kDistance, kHeight, kFov}) out[n++] = r;
     } else {
-        for (int r : {kStyle, kDistance, kHeight, kSide, kPosY, kPosZ, kFov}) out[n++] = r;
+        for (int r : {kStyle, kDistance, kHeight, kSide, kPosY, kPosZ, kFov, kJump}) out[n++] = r;
     }
     for (int r : {kZoomKeyRow, kZoomPadRow, kZoomModeRow, kResetView}) out[n++] = r;
     if (g_cfg.diagnostics) out[n++] = kDump;
@@ -148,6 +148,11 @@ static void Change(int row, int dir, bool fine) {
             t.fovAdd = dir ? Clamp(Snap(t.fovAdd + dir * step, step), -40, 40) : 0.f;
             break;
         }
+        case kJump: {  // shown in percent of the game's jump camera
+            const float step = fine ? 5.f : 10.f;
+            t.jump = dir ? Clamp(Snap(t.jump * 100 + dir * step, step), 0, 100) / 100 : 1.f;
+            break;
+        }
     }
     SetView(g_edit, t);
 }
@@ -168,6 +173,7 @@ static std::string Value(int row) {
         case kPosY: sprintf_s(b, "%+.2f m", t.posAdd[1]); return b;
         case kPosZ: sprintf_s(b, "%+.2f m", t.posAdd[2]); return b;
         case kFov: sprintf_s(b, "%+.1f\xC2\xB0", t.fovAdd); return b;
+        case kJump: sprintf_s(b, "%.0f%%", t.jump * 100); return b;
         case kZoomKeyRow:
             return g_capture && g_captureWhat == kCaptureKey ? "Press a key or mouse button" : KeyName(ZoomKey());
         case kZoomPadRow:
@@ -185,7 +191,7 @@ static std::string Value(int row) {
 static std::string Label(int row) {
     static const char* names[] = {"CameraPlus", "Editing", "Style", "Distance", "Look-at height", "Side offset",
                                   "Position Y", "Position Z", "Field of view", "Zoom key", "Zoom", "",
-                                  "Write values to log", "Idle zoom", "Idle after", "Zoom button"};
+                                  "Write values to log", "Idle zoom", "Idle after", "Zoom button", "Jump camera"};
     if (row == kResetView) return std::string("Reset ") + ViewName(g_edit) + " camera";
     if (row == kDistance && g_edit == kIdle) return "Distance (of exploration)";
     return row >= 0 && row < kRowKinds ? names[row] : "";
