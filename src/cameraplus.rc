@@ -1,0 +1,32 @@
+// Version information, shown in the DLL's Properties > Details in Windows.
+#include <winver.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION CP_VERSION_RC
+ PRODUCTVERSION CP_VERSION_RC
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Reynbow"
+            VALUE "FileDescription", "CameraPlus: a closer, tunable third-person camera for CONTROL Resonant"
+            VALUE "FileVersion", CP_VERSION
+            VALUE "InternalName", "cameraplus"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Reynbow"
+            VALUE "OriginalFilename", "cameraplus.dll"
+            VALUE "ProductName", "CameraPlus"
+            VALUE "ProductVersion", CP_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

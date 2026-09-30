@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "cameraplus",
+  "name": "CameraPlus",
+  "options": [
+    {"id": "panel_key", "type": "slider", "default": 2, "min": 0, "max": 105, "step": 1,
+     "label": "Panel key",
+     "description": "Opens and closes the CameraPlus panel, where you set up the exploration, combat, zoom and idle cameras.\n\nDrag the slider, or use left and right, to pick a key. Its name shows next to the slider. All the way left turns the key off.\n\nThe game doesn't see this key. The default is F1."},
+    {"id": "panel_button", "type": "slider", "default": 15, "min": 0, "max": 16, "step": 1,
+     "label": "Panel button",
+     "description": "Opens the CameraPlus panel with a controller. All the way left turns it off.\n\nWhile the panel is open, the D-pad chooses and changes, A selects, X sets the game's value, B closes and holding LB makes finer steps. The game doesn't see controller buttons then, but the sticks still move and look around.\n\nDuring play the game doesn't see this button; in the pause menu and the map it's the game's. The default is D-pad Left. Buttons show their Xbox name with the PlayStation one in brackets."}
+  ]
+}
