@@ -1,13 +1,14 @@
-// The cameras (exploration, combat, zoom, idle), their styles, the zoom key and which camera is live.
+// The cameras (exploration, indoor, combat, zoom, idle), their styles, the zoom key and which camera is live.
 //
 // Live camera: the one being edited while the panel is open (so it can be seen); otherwise zoom while the zoom
-// key holds (or toggles) it, combat while the HUD says we're fighting (and for a short grace after), else
-// exploration. The script reports the HUD's combat flag with every status read.
+// key holds (or toggles) it, combat while the HUD says we're fighting (and for a short grace after), indoor while
+// the game's camera state is its indoor one (camera zones in the levels set it; the hook reports it every tick),
+// else exploration. The script reports the HUD's combat flag with every status read.
 //
 // Idle: the game zooms in after you stand still a while by switching to an idle camera set, which fights our
 // changes (some of a set's values switch at once, the rest blend). We keep the game's idle timer at zero and do
-// the zoom ourselves: after the same time the idle camera (a change on top of the exploration camera, like the
-// game's own idle set's change) eases in slowly.
+// the zoom ourselves: after the same time the idle camera (a change on top of the exploration or indoor camera,
+// like the game's own idle set's change) eases in slowly.
 #include "common.h"
 #include <cmath>
 #include <stdio.h>
@@ -30,14 +31,17 @@ static const Style kStyles[] = {
     {"Zoom", 0.40f, 0.50f, -0.05f, -15.f, 0.4f},
 };
 static const int kStyleCount = (int)(sizeof(kStyles) / sizeof(kStyles[0]));
-static const char* kViewNames[kViewCount] = {"Exploration", "Combat", "Zoom", "Idle"};
-static const wchar_t* kSections[kViewCount] = {L"Exploration", L"Combat", L"Zoom", L"Idle"};
-// A fresh install: exploration close over the shoulder, combat the game's, zoom; idle has no style.
-static const int kDefaultStyle[kViewCount] = {2, 0, 4, -1};
+static const char* kViewNames[kViewCount] = {"Exploration", "Combat", "Zoom", "Idle", "Indoor"};
+static const wchar_t* kSections[kViewCount] = {L"Exploration", L"Combat", L"Zoom", L"Idle", L"Indoor"};
+// A fresh install: exploration close over the shoulder, combat the game's, zoom; idle has no style; indoor is the
+// exploration camera (IndoorFollows), Close shoulder when it gets its own.
+static const int kDefaultStyle[kViewCount] = {2, 0, 4, -1, 2};
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static Tuning g_views[kViewCount];
 static bool g_combatFollows = false;  // combat camera = the exploration camera
+static bool g_indoorFollows = true;   // indoor camera = the exploration camera
+static bool g_indoor = false;         // the game's camera state is its indoor one
 static bool g_on = true;
 static int g_zoomKey = VK_XBUTTON1;
 static bool g_zoomToggle = false;
@@ -106,8 +110,14 @@ static bool SameTuning(const Tuning& a, const Tuning& b) {
     return true;
 }
 
-int ViewStyle(int v) {  // -1 = custom, -2 = combat follows exploration
-    if (v == kCombat && g_combatFollows) return -2;
+// The camera whose values v uses: combat and indoor can be the exploration camera.
+static int Source(int v) {
+    if ((v == kCombat && g_combatFollows) || (v == kIndoor && g_indoorFollows)) return kExploration;
+    return v;
+}
+
+int ViewStyle(int v) {  // -1 = custom, -2 = the exploration camera (combat, indoor)
+    if (Source(v) != v) return -2;
     if (v == kIdle) return -1;
     const Tuning t = GetView(v);
     for (int s = 0; s < kStyleCount; ++s)
@@ -118,7 +128,7 @@ int ViewStyle(int v) {  // -1 = custom, -2 = combat follows exploration
 Tuning GetView(int v) {
     if (v < 0 || v >= kViewCount) v = 0;
     AcquireSRWLockShared(&g_lock);
-    const Tuning t = g_views[v == kCombat && g_combatFollows ? kExploration : v];
+    const Tuning t = g_views[Source(v)];
     ReleaseSRWLockShared(&g_lock);
     return t;
 }
@@ -128,6 +138,7 @@ void SetView(int v, const Tuning& t) {
     AcquireSRWLockExclusive(&g_lock);
     g_views[v] = t;
     if (v == kCombat) g_combatFollows = false;
+    if (v == kIndoor) g_indoorFollows = false;
     const Tuning& n = g_views[v];
     Log("%s camera: dist x%.3f side %+.2f posY %+.2f posZ %+.2f look-at %+.2f fov %+.1f jump %.0f%%", kViewNames[v],
         n.distMul, n.posAdd[0], n.posAdd[1], n.posAdd[2], n.targetAdd[1], n.fovAdd, n.jump * 100);
@@ -141,6 +152,21 @@ void SetCombatFollows(bool on) {
     if (on) g_views[kCombat] = g_views[kExploration];
     ReleaseSRWLockExclusive(&g_lock);
     Log("Combat camera: %s", on ? "same as exploration" : "its own");
+}
+
+bool IndoorFollows() { return g_indoorFollows; }
+void SetIndoorFollows(bool on) {
+    AcquireSRWLockExclusive(&g_lock);
+    g_indoorFollows = on;
+    if (on) g_views[kIndoor] = g_views[kExploration];
+    ReleaseSRWLockExclusive(&g_lock);
+    Log("Indoor camera: %s", on ? "same as exploration" : "its own");
+}
+
+void ReportCameraState(int state) {
+    const bool indoor = state == kStateIndoor;
+    if (indoor != g_indoor) Log("%s (camera state %d)", indoor ? "indoors" : "indoors over", state);
+    g_indoor = indoor;
 }
 
 bool CameraOn() { return g_on; }
@@ -214,12 +240,12 @@ int LiveView() {
     // No report for a while (no HUD, a loading screen): not fighting.
     const ULONGLONG now = GetTickCount64();
     if (g_combat && now - g_combatReport > 3000 && now - g_combatSeen > kCombatGraceMs) g_combat = false;
-    return g_combat ? kCombat : kExploration;
+    return g_combat ? kCombat : g_indoor ? kIndoor : kExploration;
 }
 
 bool LiveTarget(Tuning& out, float& tau) {
     const int v = LiveView();
-    const bool idle = g_idleOn && v == kExploration && g_preview < 0 && g_idleSecs >= g_idleAfter;
+    const bool idle = g_idleOn && (v == kExploration || v == kIndoor) && g_preview < 0 && g_idleSecs >= g_idleAfter;
     if (idle != g_idle) {
         if (g_cfg.diagnostics) Log("idle zoom %s", idle ? "in" : "out");
         g_idle = idle;
@@ -236,8 +262,9 @@ bool LiveTarget(Tuning& out, float& tau) {
         return false;
     }
     AcquireSRWLockShared(&g_lock);
-    if (v == kIdle || idle) out = Combine(g_views[kExploration], g_views[kIdle]);
-    else out = g_views[v == kCombat && g_combatFollows ? kExploration : v];
+    if (v == kIdle) out = Combine(g_views[kExploration], g_views[kIdle]);
+    else if (idle) out = Combine(g_views[Source(v)], g_views[kIdle]);
+    else out = g_views[Source(v)];
     ReleaseSRWLockShared(&g_lock);
     return true;
 }
@@ -311,6 +338,8 @@ void LoadViews() {
     }
     g_combatFollows = ReadInt(L"Combat", L"SameAsExploration", 0) != 0;
     if (g_combatFollows) g_views[kCombat] = g_views[kExploration];
+    g_indoorFollows = ReadInt(L"Indoor", L"SameAsExploration", 1) != 0;  // before 1.2.0 indoors was exploration
+    if (g_indoorFollows) g_views[kIndoor] = g_views[kExploration];
     wchar_t buf[64];
     ReadStr(L"CameraPlus", L"ZoomKey", L"Mouse4", buf, 64);
     g_zoomKey = ParseKeyName(buf);
@@ -328,7 +357,7 @@ void SaveViews() {
     AcquireSRWLockShared(&g_lock);
     Tuning views[kViewCount];
     for (int v = 0; v < kViewCount; ++v) views[v] = g_views[v];
-    const bool follows = g_combatFollows;
+    const bool follows = g_combatFollows, indoorFollows = g_indoorFollows;
     ReleaseSRWLockShared(&g_lock);
     for (int v = 0; v < kViewCount; ++v) {
         const Tuning& t = views[v];
@@ -352,6 +381,7 @@ void SaveViews() {
         put(L"JumpCamera", t.jump);
     }
     WritePrivateProfileStringW(L"Combat", L"SameAsExploration", follows ? L"1" : L"0", ini.c_str());
+    WritePrivateProfileStringW(L"Indoor", L"SameAsExploration", indoorFollows ? L"1" : L"0", ini.c_str());
     wchar_t b[16];
     swprintf_s(b, L"0x%02X", g_zoomKey);
     const wchar_t* name = g_zoomKey == VK_XBUTTON1 ? L"Mouse4" : g_zoomKey == VK_XBUTTON2 ? L"Mouse5"
@@ -373,6 +403,8 @@ void ResetViewsForTest() {
     g_idleSecs = 0;
     g_idle = false;
     g_combatFollows = false;
+    g_indoorFollows = true;
+    g_indoor = false;
     g_on = true;
     g_zoomKey = VK_XBUTTON1;
     g_zoomToggle = g_zoomHeld = g_zoomLatched = false;

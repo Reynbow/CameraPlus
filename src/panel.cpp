@@ -3,7 +3,7 @@
 // changes it) and the game doesn't see those presses. The mouse and the sticks still reach the game, so the camera
 // can be turned (and Jesse walked) to look at a change as it happens.
 //
-// The panel edits one camera at a time (exploration, combat, zoom, idle) and shows that one live while open. Its
+// The panel edits one camera at a time (exploration, indoor, combat, zoom, idle) and shows that one live while open. Its
 // rows depend on the camera (idle has an on/off and a time instead of a style). It also sets the zoom key and the
 // zoom button: Enter (A) on their row, then the key, mouse button or controller button.
 //
@@ -72,12 +72,21 @@ static void Bump() { InterlockedIncrement(&g_serial); }
 static float Clamp(float v, float lo, float hi) { return std::min(hi, std::max(lo, v)); }
 static float Snap(float v, float step) { return roundf(v / step) * step; }
 
-// The style row's choices for a camera: combat can also follow the exploration camera (-2).
+// The style row's choices for a camera: combat and indoor can also be the exploration camera (-2).
 static int StyleChoices(int v, int* out) {
     int n = 0;
-    if (v == kCombat) out[n++] = -2;
+    if (v == kCombat || v == kIndoor) out[n++] = -2;
     for (int s = 0; s < StyleCount(); ++s) out[n++] = s;
     return n;
+}
+
+// The order the Editing row goes through the cameras.
+static const int kEditOrder[kViewCount] = {kExploration, kIndoor, kCombat, kZoom, kIdle};
+static int NextEdit(int v, int dir) {
+    int at = 0;
+    for (int i = 0; i < kViewCount; ++i)
+        if (kEditOrder[i] == v) at = i;
+    return kEditOrder[(at + dir + kViewCount) % kViewCount];
 }
 
 // dir -1/+1 changes the row by a step (fine with Shift / LB); dir 0 puts it back to the game's value.
@@ -85,7 +94,7 @@ static void Change(int row, int dir, bool fine) {
     switch (row) {
         case kOnOff: SetCameraOn(dir == 0 ? true : !CameraOn()); return;
         case kEditing:
-            g_edit = (g_edit + dir + kViewCount) % kViewCount;
+            g_edit = NextEdit(g_edit, dir);
             SetPreview(g_edit);
             return;
         case kStyle: {
@@ -95,10 +104,11 @@ static void Change(int row, int dir, bool fine) {
             int at = -1;
             for (int i = 0; i < n; ++i)
                 if (choices[i] == cur) at = i;
-            const int next = dir == 0 ? (g_edit == kCombat ? 1 : 0)  // Delete: the game's camera
+            const int next = dir == 0 ? (choices[0] == -2 ? 1 : 0)  // Delete: the game's camera
                                       : at < 0 ? (dir > 0 ? 0 : n - 1) : (at + dir + n) % n;
             const int s = choices[next];
-            if (s == -2) SetCombatFollows(true);
+            if (s == -2 && g_edit == kCombat) SetCombatFollows(true);
+            else if (s == -2) SetIndoorFollows(true);
             else SetView(g_edit, StyleTuning(s));
             return;
         }
@@ -120,7 +130,8 @@ static void Change(int row, int dir, bool fine) {
             return;
         }
         case kResetView:
-            SetView(g_edit, DefaultView(g_edit));
+            if (g_edit == kIndoor) SetIndoorFollows(true);  // its fresh-install camera: the exploration one
+            else SetView(g_edit, DefaultView(g_edit));
             if (g_edit == kIdle) SetIdleAfter(8.f), SetIdleEnabled(true);
             return;
         case kDump: RequestDump(); return;

@@ -282,6 +282,7 @@ static void HookBlend(void* entity, void* time, void* state) {
         s = Enter(entity);
         if (s) {
             TakeIdleTimer(*s);
+            ReportCameraState(s->od[od::kState]);  // the indoor camera
             Ease();
             ApplyTarget(*s);
         }

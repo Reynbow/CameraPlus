@@ -86,7 +86,8 @@ size_t PadRepeatStateSize();
 void StartPad();int ParseKeyName(const std::wstring& name);  // "F1", "Insert", "K", "0x70"...; 0 = none/unknown
 
 // ---- the cameras (settings.cpp) ----
-enum View { kExploration, kCombat, kZoom, kIdle, kViewCount };  // idle: a change on top of exploration
+// Idle: a change on top of exploration (or indoor). Indoor: the game's indoor camera zones (camera state 1).
+enum View { kExploration, kCombat, kZoom, kIdle, kIndoor, kViewCount };
 const char* ViewName(int v);
 int StyleCount();
 const char* StyleName(int s);        // out of range: "Custom"
@@ -98,6 +99,12 @@ Tuning GetView(int v);
 void SetView(int v, const Tuning& t);
 bool CombatFollows();
 void SetCombatFollows(bool on);
+bool IndoorFollows();                // the indoor camera is the exploration camera (the default)
+void SetIndoorFollows(bool on);
+// The game's camera state (OutputData+1), which camera zones in the levels set; 1 is the indoor one (a closer,
+// narrower set), 2 a wide one (big rooms, fights), 0 the rest.
+const int kStateIndoor = 1;
+void ReportCameraState(int state);
 bool CameraOn();
 void SetCameraOn(bool on);
 int ZoomKey();
@@ -198,7 +205,9 @@ std::string BuildConfigJs();
 // blend started) and +0x410 (the set it goes to); offsets inside it are from the conversion at +0x27c3950.
 namespace od {
 const size_t kSize = 0x610;
-const size_t kMode = 0x0, kState = 0x1;  // bytes select_set picks the set by (player mode, state)
+// Bytes select_set picks the set by: a mode and the camera state (camera_set_state_zone's zones in the levels ask for
+// one: 0x1427c0740 adds a zone's request when the player enters it, 0x1427c07f0 drops it when they leave).
+const size_t kMode = 0x0, kState = 0x1;
 // int: the movement the set is for, as select_set picks it each frame (0x1427c3570): the number of the first bit of
 // {1 idle, 2 dodge, 3 dash, 4 jump, 5 sprint, 6 execution/reach, 7 carry, 8..10 lock-on} the state has a set for,
 // else 0. Jump: the Jump component's +0x15 is 2 and +0x14 isn't 4 (in the air after a jump).
