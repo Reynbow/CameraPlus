@@ -41,12 +41,15 @@ static BlendFn volatile g_origBlend = nullptr;
 static bool g_installed = false;
 bool CameraHookInstalled() { return g_installed; }
 
-// The params fields we change (float offsets inside the block).
+// The params fields we change (float offsets inside the block): the framing (the jump camera blends these), then the
+// pivot's horizontal smooth times.
 static const size_t kFields[] = {od::pFov,         od::pDistMul,      od::pDefault,      od::pDefault + 4,
                                  od::pDefault + 8, od::pSafe,         od::pSafe + 4,     od::pSafe + 8,
                                  od::pFallback,    od::pFallback + 4, od::pFallback + 8, od::pTarget,
-                                 od::pTarget + 4,  od::pTarget + 8};
+                                 od::pTarget + 4,  od::pTarget + 8,   od::pGroundedSmooth, od::pAirborneSmooth};
 static const int kN = (int)(sizeof(kFields) / sizeof(kFields[0]));
+static const int kFramed = 14;  // kFields before the smooth times
+static const int kGroundedFollow = 14, kAirborneFollow = 15;
 
 // One state for the player's camera. Not keyed by address: the ECS moves the player's components to another
 // chunk whenever its archetype changes (at a load, and in play), copying our values along; the check "still holds
@@ -63,6 +66,8 @@ struct Slot {
     uint8_t mode = 0xff, state = 0xff;
     int moves = 0;
     int trace = 0;  // diagnostics: ticks left to log after a set switch
+    char requests[512] = {};  // diagnostics: the camera state requests last logged
+    int requestLogs = 0;
 };
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static Slot g_slot;
@@ -172,6 +177,13 @@ static void Apply(const float* raw, float* mod) {
     for (int v = 0; v < 3; ++v)  // default, safe, fallback
         for (int a = 0; a < 3; ++a) mod[2 + v * 3 + a] = raw[2 + v * 3 + a] + t.posAdd[a];
     for (int a = 0; a < 3; ++a) mod[11 + a] = raw[11 + a] + t.targetAdd[a];
+    // The pivot follows the player by these smooth times (seconds; sideways and toward/away from the camera), so a
+    // quick move puts it a fixed lag behind, in metres. In a closer camera that lag is a bigger part of the screen: a
+    // dodge back toward a camera at half the distance (the dodge set doubles the lag, 0.075 -> 0.15 s) took the player
+    // off screen for a moment. So the lag shrinks with the distance; further cameras keep the game's.
+    const float follow = std::min(1.f, std::max(0.f, t.distMul));
+    mod[kGroundedFollow] = raw[kGroundedFollow] * follow;
+    mod[kAirborneFollow] = raw[kAirborneFollow] * follow;
     if (t.Identity())
         for (int i = 0; i < kN; ++i) mod[i] = raw[i];  // bit-exact
 }
@@ -211,8 +223,8 @@ static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw) {
     const uint8_t* to = p + od::kTo;
     Log("  set %08x: fov %.4f aspect %.3f dist x%.3f hide %.2f vertical(%.3f %.3f) grounded(%.3f %.3f %.3f) "
         "airborne(%.3f %.3f %.3f)", id, raw[0], F(to, od::pAspect), raw[1], F(to, od::pHide), F(to, od::pVertical),
-        F(to, od::pVertical + 4), F(to, od::pGroundedSmooth), F(to, od::pGroundedSmooth + 4),
-        F(to, od::pGroundedSmooth + 8), F(to, od::pAirborneSmooth), F(to, od::pAirborneSmooth + 4),
+        F(to, od::pVertical + 4), raw[kGroundedFollow], F(to, od::pGroundedSmooth + 4),
+        F(to, od::pGroundedSmooth + 8), raw[kAirborneFollow], F(to, od::pAirborneSmooth + 4),
         F(to, od::pAirborneSmooth + 8));
     Log("  set %08x: default(%.3f %.3f %.3f) safe(%.3f %.3f %.3f) fallback(%.3f %.3f %.3f) target(%.3f %.3f %.3f)", id,
         raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], raw[13]);
@@ -253,10 +265,11 @@ static void Diagnose(Slot& s) {
     if (now - g_lastSnap >= 5000) {
         g_lastSnap = now;
         const uint8_t* o = p + od::kOut;
-        Log("snap set %08x t=%.2f out: fov %.4f dist x%.3f default(%.3f %.3f %.3f) target(%.3f %.3f %.3f) ease dist "
-            "x%.3f jump %.0f%%", (uint32_t)set, F(p, od::kT), F(o, od::pFov), F(o, od::pDistMul), F(o, od::pDefault),
-            F(o, od::pDefault + 4), F(o, od::pDefault + 8), F(o, od::pTarget), F(o, od::pTarget + 4),
-            F(o, od::pTarget + 8), g_cur.distMul, g_cur.jump * 100);
+        Log("snap set %08x state %u t=%.2f out: fov %.4f dist x%.3f default(%.3f %.3f %.3f) target(%.3f %.3f %.3f) "
+            "follow %.3f/%.3f s ease dist x%.3f jump %.0f%%", (uint32_t)set, p[od::kState], F(p, od::kT), F(o, od::pFov),
+            F(o, od::pDistMul), F(o, od::pDefault), F(o, od::pDefault + 4), F(o, od::pDefault + 8), F(o, od::pTarget),
+            F(o, od::pTarget + 4), F(o, od::pTarget + 8), F(o, od::pGroundedSmooth), F(o, od::pAirborneSmooth),
+            g_cur.distMul, g_cur.jump * 100);
     }
 }
 
@@ -295,7 +308,7 @@ static void ApplyTarget(Slot& s) {
         memcpy(s.ground, s.raw, sizeof(s.ground));
         s.groundValid = true;
     } else if (s.groundValid && g_cur.jump != 1.f) {
-        for (int i = 0; i < kN; ++i) base[i] = s.ground[i] + (s.raw[i] - s.ground[i]) * g_cur.jump;
+        for (int i = 0; i < kFramed; ++i) base[i] = s.ground[i] + (s.raw[i] - s.ground[i]) * g_cur.jump;
     }
     Apply(base, s.mod);
     for (int i = 0; i < kN; ++i) SetF(to, kFields[i], s.mod[i]);
@@ -385,6 +398,68 @@ static void KeepFightState(Slot& s) {
     }
 }
 
+// ---- indoors ----
+// Indoors the game's camera zones ask for its indoor camera state (1): sets with the camera closer and a narrower
+// field of view (seen: distance x1.44 against x1.6 and 69 degrees against 77; PewCat measured x1.00 against x1.22 and a
+// distance curve 1.47 times shorter, 65 degrees against 75). CameraPlus's changes go on top of whatever set the game
+// picks, so with the indoor camera "Same as exploration" the camera still moved in indoors. Now, while that's the
+// indoor camera and the first request asks for the indoor state, CameraPlus asks for the usual state (0) just above
+// it: the game keeps its usual sets indoors, and the exploration camera is the same inside and out. An indoor camera of
+// its own (Game default included) is made on top of the game's indoor sets, as before. Other states (the fight
+// camera's) aren't touched: a request that outranks the indoor one wins as usual.
+static const uint64_t kOurUsualRequest = 0x3053554C504D4143ull;  // "CAMPLUS0", not an entity
+
+static void KeepUsualState(Slot& s) {
+    if (!g_addRequest || !g_dropRequest) return;
+    uint8_t* p = s.od;
+    const StateRequest* list = *(const StateRequest* const*)(p + od::kRequests);
+    const uint32_t n = *(const uint32_t*)(p + od::kRequestCount);
+    if (n && !list) return;
+    int ours = -1, first = -1;
+    for (uint32_t i = 0; i < n && i < 64; ++i) {
+        if (list[i].entity == kOurUsualRequest) {
+            if (ours < 0) ours = (int)i;
+        } else if (first < 0) {
+            first = (int)i;
+        }
+    }
+    const uint32_t priority = first >= 0 ? list[first].priority : 0;
+    const bool indoor = first >= 0 && (uint8_t)list[first].state == kStateIndoor;
+    const bool want = indoor && priority != 0xffffffffu && CameraOn() && !g_testOverride && IndoorFollows();
+    if (want && ours == 0 && list[0].priority > priority) return;  // in place: first, above the zone's
+    if (ours >= 0) {
+        g_dropRequest(p, kOurUsualRequest);
+        if (!want && g_cfg.diagnostics) Log("indoors: the game's indoor camera state again");
+    }
+    if (want) {
+        const StateRequest r{kOurUsualRequest, priority + 1, 0};
+        g_addRequest(p, &r);
+        if (g_cfg.diagnostics && ours < 0) Log("indoors: the usual camera state kept (indoor camera = exploration)");
+    }
+}
+
+// Diagnostics: the camera state requests (the zones the player is in, and CameraPlus's) when they change.
+static void LogRequests(Slot& s) {
+    const StateRequest* list = *(const StateRequest* const*)(s.od + od::kRequests);
+    const uint32_t n = *(const uint32_t*)(s.od + od::kRequestCount);
+    if (n && !list) return;
+    char line[sizeof(s.requests)];
+    int k = sprintf_s(line, "state requests:%s", n ? "" : " none");
+    for (uint32_t i = 0; i < n && i < 6 && k > 0; ++i) {  // at most 6 x 52 characters
+        const uint64_t e = list[i].entity;
+        const char* who = e == kOurRequest ? "CameraPlus fight" : e == kOurUsualRequest ? "CameraPlus usual" : nullptr;
+        const int add = who ? _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " [%s, priority %u, state %u]", who,
+                                          list[i].priority, list[i].state & 0xff)
+                            : _snprintf_s(line + k, sizeof(line) - k, _TRUNCATE, " [%llx, priority %u, state %u]",
+                                          (unsigned long long)e, list[i].priority, list[i].state & 0xff);
+        if (add < 0) break;
+        k += add;
+    }
+    if (k <= 0 || strcmp(line, s.requests) == 0) return;
+    strcpy_s(s.requests, line);
+    if (++s.requestLogs <= 300) Log("%s", line);
+}
+
 static Slot* Enter(void* entity) {
     uint8_t* p = OutputOf(entity);
     return p ? SlotFor(p) : nullptr;
@@ -401,6 +476,7 @@ static void HookBlend(void* entity, void* time, void* state) {
             Ease(time ? *(const float*)time : 0.f);  // FixedTime starts with the tick's time step
             ApplyTarget(*s);
             KeepFightState(*s);
+            KeepUsualState(*s);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (s) s->valid = false;
@@ -410,7 +486,10 @@ static void HookBlend(void* entity, void* time, void* state) {
     __try {
         if (s) {
             if (g_dump) DumpNow(*s);
-            if (g_cfg.diagnostics) Diagnose(*s);
+            if (g_cfg.diagnostics) {
+                Diagnose(*s);
+                LogRequests(*s);
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
