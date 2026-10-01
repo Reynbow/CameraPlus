@@ -49,8 +49,9 @@ static void Setup() {
         Log("%s camera: %s, dist x%.3f side %+.2f look-at %+.2f fov %+.1f", ViewName(v),
             st == -2 ? "same as exploration" : StyleName(st), t.distMul, t.posAdd[0], t.targetAdd[1], t.fovAdd);
     }
-    Log("Settings: diagnostics=%d, panel key %s, zoom key %s (%s)", g_cfg.diagnostics, Utf8(g_cfg.panelKeyName).c_str(),
-        KeyName(ZoomKey()).c_str(), ZoomToggle() ? "toggle" : "hold");
+    Log("Settings: diagnostics=%d, panel key %s, zoom key %s (%s), wheel zoom %s, touchpad zoom %s", g_cfg.diagnostics,
+        Utf8(g_cfg.panelKeyName).c_str(), KeyName(ZoomKey()).c_str(), ZoomToggle() ? "toggle" : "hold",
+        WheelZoom() ? "on" : "off", TouchZoom() ? "on" : "off");
 
     std::string err;
     if (!InstallCameraHook(img, err)) {
@@ -79,6 +80,11 @@ static void Setup() {
     } else {
         StartPanel();
         StartPad();
+        // Wheel zoom (read in the panel's window hook): in play the game's own raw input reads get the mouse without
+        // the wheel. It needs the pause flag, so menus (the map, the pause menu) keep their wheel.
+        err.clear();
+        if (!PauseKnown()) Log("Wheel zoom off: it needs the pause flag");
+        else if (!InstallWheelBlock(img, err)) Log("Wheel zoom off: %s", err.c_str());
     }
     Log("Setup done: camera hook installed");
 }

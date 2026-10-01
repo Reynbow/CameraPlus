@@ -74,6 +74,7 @@ uint16_t PadButtonCode(int index);     // the game's code for it (0 for none)
 int PanelButton();
 void SetPanelButton(int index);
 bool GamePaused();                     // the game's pause flag (the pause menu, the map...)
+bool PauseKnown();                     // the pause flag was found (else GamePaused() is always false)
 bool FindPausedFlag(const Image& img, uint32_t blend, uint32_t& slotRva);
 void UsePausedFlag(uint32_t slotRva);
 void SetPausedForTest(const uint8_t* flag);
@@ -83,7 +84,26 @@ bool InstallPadBlockAt(uint8_t* dispatch, const uint8_t* original, std::string& 
 bool PadBlockInstalled();
 void PadPoll(uint32_t buttons, uint32_t prev, ULONGLONG now, void* repeat, bool& wasZoom);  // one poll (tests)
 size_t PadRepeatStateSize();
-void StartPad();int ParseKeyName(const std::wstring& name);  // "F1", "Insert", "K", "0x70"...; 0 = none/unknown
+void StartPad();
+// A PlayStation pad's HID input report: its buttons and the touchpad's first finger.
+struct SonyReport {
+    uint32_t buttons = 0;
+    bool hasTouch = false;  // the report has the touchpad (Bluetooth's short reports don't)
+    bool touching = false;  // a finger is on it
+    uint8_t touchId = 0;    // counts up with every new touch
+    int touchY = 0;         // 0 at the top edge
+    int touchHeight = 1080; // the touchpad's height in the same units
+    bool touchClick = false;  // the touchpad is pressed in (the game's map and quest log button)
+};
+bool ParseSonyReport(uint16_t pid, size_t reportLength, const uint8_t* d, size_t n, SonyReport& out);
+// A one-finger swipe up or down the touchpad, as zoom steps (+1 closer, -1 further).
+struct TouchTrack {
+    bool down = false, click = false;
+    uint8_t id = 0;
+    int anchor = 0;  // where the finger was at the last step
+};
+int TouchSteps(TouchTrack& t, const SonyReport& r);
+int ParseKeyName(const std::wstring& name);  // "F1", "Insert", "K", "0x70"...; 0 = none/unknown
 
 // ---- the cameras (settings.cpp) ----
 // Idle: a change on top of exploration (or indoor). Indoor: the game's indoor camera zones (camera state 1).
@@ -116,6 +136,15 @@ int ZoomButton();                    // the controller's zoom button (a place in
 void SetZoomButton(int index);
 void ZoomPadEvent(bool down);        // the zoom button went down / up in play
 void ZoomRelease();
+bool WheelZoom();                    // the mouse wheel zooms in play
+void SetWheelZoom(bool on);
+bool TouchZoom();                    // a swipe on a PlayStation pad's touchpad zooms in play
+void SetTouchZoom(bool on);
+// A wheel notch or touchpad step: the live camera's distance (the camera the panel shows while it's open) step
+// percentage points closer (+) or further (-), on the panel's 5% grid. False if it's already at the end. Saved a
+// moment later (SaveIfDue).
+bool StepDistance(int step);
+void SaveIfDue(ULONGLONG now);       // saves the cameras once the zoom steps have stopped for a moment
 void ReportCombat(bool combat);      // the HUD's combat flag, from the script
 void SetPreview(int v);              // the panel shows camera v live (-1: none)
 bool IdleEnabled();
@@ -143,6 +172,7 @@ struct Image {
     std::vector<uint8_t> mem;  // sections copied to their RVAs
     uint64_t prefBase = 0;
     uint32_t sizeOfImage = 0;
+    uint32_t importRva = 0;    // the import directory
     std::vector<Section> secs;
     const Section* SectionOf(uint32_t rva) const;
     bool Contains(uint32_t rva, uint32_t n) const { return (uint64_t)rva + n <= mem.size(); }
@@ -161,6 +191,8 @@ std::vector<uint32_t> FindPattern(const Image& img, const Pattern& p, size_t max
 bool MatchAt(const Image& img, uint32_t rva, const Pattern& p);
 // Unique match or 0 with an error message.
 uint32_t FindUnique(const Image& img, const char* what, const char* pattern, std::string& err);
+// The import table slot the game calls func of dll through (an RVA), or 0.
+uint32_t FindImportSlot(const Image& img, const char* dll, const char* func);
 
 // ---- inline hooks (hook.cpp) ----
 bool PatchCode(uint8_t* target, const uint8_t* patch, size_t n);
@@ -193,6 +225,14 @@ void PanelCapturePad(int button, bool cancel);  // a controller button pressed w
 void PanelToggleFromPad();                // the panel button
 void PanelPadKey(int vk, bool fine);      // a controller press while open, as the key it stands for
 std::string PanelAction(const std::string& action, const char* query);  // the __cameraplus__.json endpoint
+// Wheel and touchpad zoom. The game reads the mouse through GetRawInputData (its import table) and binds the wheel
+// in play too (the controller's ability layer); while wheel zoom works, its own calls get the mouse without the wheel.
+bool InstallWheelBlock(const Image& img, std::string& err);
+bool InstallWheelBlockAt(void** slot, std::string& err);  // on a stand-in slot (tests)
+bool WheelBlockInstalled();
+bool WheelZooming();                      // the wheel is CameraPlus's now: wheel zoom on, CameraPlus on, in play
+void PanelWheel(int delta);               // the wheel turned (120 a notch, + away from you) while WheelZooming()
+void PanelZoomStep(int step);             // a zoom step (+ closer): StepDistance, and the panel shows it
 
 // ---- UI resource interception (resources.cpp) ----
 bool FindResourceSlot(const Image& img, uint32_t& slotRva, std::string& err);

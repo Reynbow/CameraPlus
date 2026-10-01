@@ -9,6 +9,9 @@
 // changes (some of a set's values switch at once, the rest blend). We keep the game's idle timer at zero and do
 // the zoom ourselves: after the same time the idle camera (a change on top of the exploration or indoor camera,
 // like the game's own idle set's change) eases in slowly.
+//
+// Wheel and touchpad zoom: each notch or swipe step changes the live camera's Distance (the camera whose values it
+// uses: exploration's while combat or indoor follow it), saved once the steps stop.
 #include "common.h"
 #include <cmath>
 #include <stdio.h>
@@ -57,6 +60,10 @@ static bool g_idleOn = true;
 static float g_idleAfter = 8.f;  // seconds standing still, like the game's "Idle CameraSet Time"
 static float g_idleSecs = 0.f;
 static bool g_idle = false;
+static bool g_wheelZoom = true, g_touchZoom = true;
+static volatile LONG64 g_saveAt = 0;  // when SaveIfDue saves the zoom steps' camera (0: nothing to save)
+static volatile LONG g_zoomed = -1;   // the camera the last zoom step changed
+static const ULONGLONG kZoomSaveMs = 1500;
 
 const char* ViewName(int v) { return v >= 0 && v < kViewCount ? kViewNames[v] : ""; }
 int StyleCount() { return kStyleCount; }
@@ -209,6 +216,40 @@ void ZoomPadEvent(bool down) {
     g_zoomPadHeld = down;
 }
 
+bool WheelZoom() { return g_wheelZoom; }
+void SetWheelZoom(bool on) {
+    g_wheelZoom = on;
+    Log("Wheel zoom %s", on ? "on" : "off");
+}
+bool TouchZoom() { return g_touchZoom; }
+void SetTouchZoom(bool on) {
+    g_touchZoom = on;
+    Log("Touchpad zoom %s", on ? "on" : "off");
+}
+
+bool StepDistance(int step) {
+    const int v = Source(LiveView());
+    AcquireSRWLockExclusive(&g_lock);
+    float& d = g_views[v].distMul;
+    const float pct = std::min(300.f, std::max(20.f, roundf((d * 100 - step) / 5) * 5));  // on the panel's 5% grid
+    const bool changed = fabsf(pct / 100 - d) > 1e-4f;
+    if (changed) d = pct / 100;
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!changed) return false;
+    g_zoomed = v;
+    InterlockedExchange64(&g_saveAt, (LONG64)(GetTickCount64() + kZoomSaveMs));
+    if (g_cfg.diagnostics) Log("zoom step: %s camera distance %.0f%%", kViewNames[v], pct);
+    return true;
+}
+
+void SaveIfDue(ULONGLONG now) {
+    const LONG64 at = g_saveAt;
+    if (!at || now < (ULONGLONG)at || InterlockedCompareExchange64(&g_saveAt, 0, at) != at) return;
+    SaveViews();
+    const int v = g_zoomed;
+    if (v >= 0 && v < kViewCount) Log("%s camera distance %.0f%% (zoomed), saved", kViewNames[v], GetView(v).distMul * 100);
+}
+
 void ReportCombat(bool combat) {
     const ULONGLONG now = GetTickCount64();
     g_combatReport = now;
@@ -347,11 +388,15 @@ void LoadViews() {
     g_zoomToggle = _wcsicmp(buf, L"Toggle") == 0;
     const int zb = ReadInt(L"CameraPlus", L"ZoomButton", 0);
     g_zoomPad = zb >= 0 && zb < PadButtonCount() ? zb : 0;
+    g_wheelZoom = ReadInt(L"CameraPlus", L"WheelZoom", 1) != 0;
+    g_touchZoom = ReadInt(L"CameraPlus", L"TouchpadZoom", 1) != 0;
     g_idleOn = ReadInt(L"Idle", L"Enabled", 1) != 0;
     SetIdleAfter(ReadF(L"Idle", L"After", 8.f, 1, 120));
 }
 
 void SaveViews() {
+    static SRWLOCK saving = SRWLOCK_INIT;  // the panel (closing) and the pad thread (after a zoom) both save
+    AcquireSRWLockExclusive(&saving);
     const std::wstring ini = StatePath();
     const wchar_t* const* sections = kSections;
     AcquireSRWLockShared(&g_lock);
@@ -391,9 +436,12 @@ void SaveViews() {
     WritePrivateProfileStringW(L"CameraPlus", L"ZoomMode", g_zoomToggle ? L"Toggle" : L"Hold", ini.c_str());
     swprintf_s(b, L"%d", g_zoomPad);
     WritePrivateProfileStringW(L"CameraPlus", L"ZoomButton", b, ini.c_str());
+    WritePrivateProfileStringW(L"CameraPlus", L"WheelZoom", g_wheelZoom ? L"1" : L"0", ini.c_str());
+    WritePrivateProfileStringW(L"CameraPlus", L"TouchpadZoom", g_touchZoom ? L"1" : L"0", ini.c_str());
     WritePrivateProfileStringW(L"Idle", L"Enabled", g_idleOn ? L"1" : L"0", ini.c_str());
     swprintf_s(b, L"%.1f", g_idleAfter);
     WritePrivateProfileStringW(L"Idle", L"After", b, ini.c_str());
+    ReleaseSRWLockExclusive(&saving);
 }
 
 void ResetViewsForTest() {
@@ -410,6 +458,9 @@ void ResetViewsForTest() {
     g_zoomToggle = g_zoomHeld = g_zoomLatched = false;
     g_zoomPad = 0;
     g_zoomPadHeld = false;
+    g_wheelZoom = g_touchZoom = true;
+    g_saveAt = 0;
+    g_zoomed = -1;
     g_combat = false;
     g_preview = -1;
 }

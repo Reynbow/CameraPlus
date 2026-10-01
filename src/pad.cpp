@@ -2,7 +2,8 @@
 //
 // Reading: Xbox-style pads through XInput and DualSense, DualSense Edge and DualShock 4 pads from their HID input
 // reports (FastTravelPlus's reader, so they work without Steam Input). Both are read-only and shared with the
-// game. This drives the panel button, the panel's own controls and the zoom button.
+// game. This drives the panel button, the panel's own controls and the zoom button, and on PlayStation pads the
+// touchpad zoom (a one-finger swipe up or down; the game only uses the touchpad's press).
 //
 // Keeping presses from the game: the game asks about a pad button through two small dispatchers, whatever the pad
 // (0x142975160 "down", 0x1429751a0 "went down this frame"; each forwards to the XInput backend at +0x40 or the
@@ -61,6 +62,8 @@ bool GamePaused() {
     const uint8_t* g = *g_pausedSlot;
     return g && g[0x38] != 0;
 }
+
+bool PauseKnown() { return g_testPaused || g_pausedSlot; }
 
 bool FindPausedFlag(const Image& img, uint32_t blend, uint32_t& slotRva) {
     slotRva = 0;
@@ -238,21 +241,72 @@ static bool IsSonyPad(uint16_t vid, uint16_t pid) {
     return vid == 0x054C && (IsDualSense(pid) || pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0);
 }
 
-// One input report. reportLength is the device's input report size: 64 over USB, larger over Bluetooth.
-static bool ParseSonyReport(uint16_t pid, size_t reportLength, const uint8_t* d, size_t n, uint32_t& buttons) {
+// One input report. reportLength is the device's input report size: 64 over USB, larger over Bluetooth. The
+// touchpad's first finger is 25 bytes after the buttons on a DualSense and 30 on a DualShock 4 (Bluetooth's short
+// reports have none): a byte whose top bit is set while no finger is down (the rest counts the touches), then x
+// and y in 12 bits each. The touchpad is 1920 x 1080 on a DualSense, 1920 x 942 on a DualShock 4; its press is bit
+// 1 of the byte after the buttons.
+bool ParseSonyReport(uint16_t pid, size_t reportLength, const uint8_t* d, size_t n, SonyReport& out) {
+    out = SonyReport();
     if (n < 10) return false;
-    size_t at = 0;  // offset of the two button bytes
+    size_t at = 0;     // offset of the two button bytes
+    size_t touch = 0;  // offset of the first finger (0: none in this report)
+    int height = 1080;
     if (IsDualSense(pid)) {
-        if (d[0] == 0x01 && reportLength == 64 && n >= 11) at = 8;        // USB
-        else if (d[0] == 0x31 && n >= 12) at = 9;                         // Bluetooth, full reports
-        else if (d[0] == 0x01) at = 5;                                    // Bluetooth, simple reports
+        if (d[0] == 0x01 && reportLength == 64 && n >= 11) at = 8, touch = at + 25;  // USB
+        else if (d[0] == 0x31 && n >= 12) at = 9, touch = at + 25;                   // Bluetooth, full reports
+        else if (d[0] == 0x01) at = 5;                                               // Bluetooth, simple reports
     } else {
-        if (d[0] == 0x01) at = 5;                                         // USB, and Bluetooth simple reports
-        else if (d[0] == 0x11 && n >= 10) at = 7;                         // Bluetooth, full reports
+        height = 942;
+        if (d[0] == 0x01) at = 5, touch = reportLength == 64 ? at + 30 : 0;          // USB, and Bluetooth simple reports
+        else if (d[0] == 0x11 && n >= 10) at = 7, touch = at + 30;                   // Bluetooth, full reports
     }
     if (!at) return false;
-    buttons = FromSony(d[at], d[at + 1]);
+    out.buttons = FromSony(d[at], d[at + 1]);
+    if (touch && n >= touch + 4) {
+        const uint8_t* f = d + touch;
+        out.hasTouch = true;
+        out.touching = !(f[0] & 0x80);
+        out.touchId = f[0] & 0x7f;
+        out.touchY = (f[2] >> 4) | (f[3] << 4);
+        out.touchHeight = height;
+        out.touchClick = (d[at + 2] & 0x02) != 0;
+    }
     return true;
+}
+
+// Every sixteenth of the touchpad's height the finger moves up is a step closer, down a step further. A touch that
+// presses the touchpad in (the game's map) never zooms.
+int TouchSteps(TouchTrack& t, const SonyReport& r) {
+    if (!r.hasTouch || !r.touching) {
+        t.down = false;
+        return 0;
+    }
+    if (!t.down || r.touchId != t.id) {  // a new touch
+        t.down = true;
+        t.id = r.touchId;
+        t.anchor = r.touchY;
+        t.click = r.touchClick;
+        return 0;
+    }
+    t.click = t.click || r.touchClick;
+    if (t.click) return 0;
+    const int step = std::max(1, r.touchHeight / 16);
+    int steps = 0;
+    for (; t.anchor - r.touchY >= step; t.anchor -= step) ++steps;
+    for (; r.touchY - t.anchor >= step; t.anchor += step) --steps;
+    return steps;
+}
+
+static bool GameHasFocus();
+
+// The touchpad zooms in play, like the wheel (the touch is still followed in menus, so a swipe that goes on after
+// one closes doesn't jump). A whole swipe up or down the touchpad is 80% of the distance (half that felt too slow).
+static const int kTouchStep = 5;  // distance percentage points a step
+static void TouchZoomSteps(int steps) {
+    if (!steps || !TouchZoom() || !CameraOn() || GamePaused() || !GameHasFocus()) return;
+    for (; steps > 0; --steps) PanelZoomStep(kTouchStep);
+    for (; steps < 0; ++steps) PanelZoomStep(-kTouchStep);
 }
 
 struct HidPad {
@@ -263,6 +317,7 @@ struct HidPad {
     uint16_t pid = 0;
     bool pending = false;
     uint32_t buttons = 0;
+    TouchTrack touch;
     std::wstring path;
 };
 
@@ -366,8 +421,11 @@ static DWORD WINAPI HidThread(void*) {
             bool gone = p->buttons == 0xFFFFFFFF;
             if (!gone && p->pending && GetOverlappedResult(p->h, &p->ov, &got, FALSE)) {
                 p->pending = false;
-                uint32_t b = 0;
-                if (ParseSonyReport(p->pid, p->buf.size(), p->buf.data(), got, b)) p->buttons = b;
+                SonyReport r;
+                if (ParseSonyReport(p->pid, p->buf.size(), p->buf.data(), got, r)) {
+                    p->buttons = r.buttons;
+                    TouchZoomSteps(TouchSteps(p->touch, r));
+                }
             } else if (!gone && p->pending && GetLastError() != ERROR_IO_INCOMPLETE) {
                 p->pending = false;
                 gone = true;  // unplugged or switched off
@@ -472,6 +530,9 @@ static DWORD WINAPI PadThread(void*) {
         const bool paused = GamePaused();
         if (paused != wasPaused && g_cfg.diagnostics) Log("game %s", paused ? "paused" : "running");
         wasPaused = paused;
+        // The wheel and touchpad zoom change a camera; this thread saves it once the steps stop (the window and
+        // the game shouldn't wait on the file).
+        SaveIfDue(now);
     }
 }
 

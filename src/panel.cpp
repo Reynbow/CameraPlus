@@ -9,7 +9,9 @@
 //
 // The game reads the keyboard and mouse as raw input (WM_INPUT, GetRawInputData) in its window procedure. We
 // subclass that window: while the panel is open we keep key presses from it (releases always go through, so a key
-// held when the panel opens is released in the game as usual), and in play we watch the zoom key. The controller
+// held when the panel opens is released in the game as usual), and in play we watch the zoom key and the wheel.
+// The wheel zooms (the live camera's distance), so in play the game's own GetRawInputData calls (through its import
+// table) get the mouse without it: its default binding switches the controller's ability layer. The controller
 // side is pad.cpp. CameraPlus.js draws the panel from PanelAction's status, reports the HUD's combat flag and passes
 // on the MODS page's sliders.
 //
@@ -42,7 +44,7 @@ struct Locked {
 
 // ---- rows ----
 enum Row { kOnOff, kEditing, kStyle, kDistance, kHeight, kSide, kPosY, kPosZ, kFov, kZoomKeyRow, kZoomModeRow,
-           kResetView, kDump, kIdleOn, kIdleAfter, kZoomPadRow, kJump, kRowKinds };
+           kResetView, kDump, kIdleOn, kIdleAfter, kZoomPadRow, kJump, kWheelRow, kTouchRow, kRowKinds };
 
 // The rows shown for the camera being edited; g_sel is a place in this list.
 static int Rows(int* out) {
@@ -54,7 +56,7 @@ static int Rows(int* out) {
     } else {
         for (int r : {kStyle, kDistance, kHeight, kSide, kPosY, kPosZ, kFov, kJump}) out[n++] = r;
     }
-    for (int r : {kZoomKeyRow, kZoomPadRow, kZoomModeRow, kResetView}) out[n++] = r;
+    for (int r : {kZoomKeyRow, kZoomPadRow, kZoomModeRow, kWheelRow, kTouchRow, kResetView}) out[n++] = r;
     if (g_cfg.diagnostics) out[n++] = kDump;
     return n;
 }
@@ -123,6 +125,8 @@ static void Change(int row, int dir, bool fine) {
             }
             return;
         case kZoomModeRow: SetZoomToggle(dir == 0 ? false : !ZoomToggle()); return;
+        case kWheelRow: SetWheelZoom(dir == 0 ? true : !WheelZoom()); return;
+        case kTouchRow: SetTouchZoom(dir == 0 ? true : !TouchZoom()); return;
         case kIdleOn: SetIdleEnabled(dir == 0 ? true : !IdleEnabled()); return;
         case kIdleAfter: {
             const float step = fine ? 0.5f : 1.f;
@@ -191,6 +195,8 @@ static std::string Value(int row) {
             if (g_capture && g_captureWhat == kCapturePad) return "Press a controller button";
             return ZoomButton() ? PadButtonName(ZoomButton()) : "None";
         case kZoomModeRow: return ZoomToggle() ? "Toggle" : "Hold";
+        case kWheelRow: return !WheelBlockInstalled() ? "Not available" : WheelZoom() ? "On" : "Off";
+        case kTouchRow: return TouchZoom() ? "On" : "Off";
         case kIdleOn: return IdleEnabled() ? "On" : "Off";
         case kIdleAfter: sprintf_s(b, "%.1f s", IdleAfter()); return b;
         case kResetView: return "Enter";
@@ -202,7 +208,8 @@ static std::string Value(int row) {
 static std::string Label(int row) {
     static const char* names[] = {"CameraPlus", "Editing", "Style", "Distance", "Look-at height", "Side offset",
                                   "Position Y", "Position Z", "Field of view", "Zoom key", "Zoom", "",
-                                  "Write values to log", "Idle zoom", "Idle after", "Zoom button", "Jump camera"};
+                                  "Write values to log", "Idle zoom", "Idle after", "Zoom button", "Jump camera",
+                                  "Wheel zoom", "Touchpad zoom"};
     if (row == kResetView) return std::string("Reset ") + ViewName(g_edit) + " camera";
     if (row == kDistance && g_edit == kIdle) return "Distance (of exploration)";
     return row >= 0 && row < kRowKinds ? names[row] : "";
@@ -233,8 +240,8 @@ static void Press(int vk, bool fine) {
         case VK_RIGHT: case 'D': Change(RowAt(g_sel), +1, fine); break;
         case VK_RETURN: case VK_SPACE: {
             const int r = RowAt(g_sel);
-            if (r == kOnOff || r == kZoomKeyRow || r == kZoomPadRow || r == kZoomModeRow || r == kResetView ||
-                r == kDump || r == kIdleOn)
+            if (r == kOnOff || r == kZoomKeyRow || r == kZoomPadRow || r == kZoomModeRow || r == kWheelRow ||
+                r == kTouchRow || r == kResetView || r == kDump || r == kIdleOn)
                 Change(r, +1, fine);
             break;
         }
@@ -305,6 +312,75 @@ void PanelPadKey(int vk, bool fine) {
     Press(vk, fine);
 }
 
+void PanelZoomStep(int step) {
+    Locked l;
+    if (StepDistance(step)) Bump();  // the panel's Distance row, if it's open
+}
+
+// ---- the wheel ----
+using GetRawInputDataFn = UINT(WINAPI*)(HRAWINPUT, UINT, LPVOID, PUINT, UINT);
+static GetRawInputDataFn volatile g_gameGetRawInputData = nullptr;  // what the game's import slot held
+static bool g_wheelBlock = false;
+static int g_wheel = 0;  // turned, but not a whole notch yet (smooth wheels send less at a time); window thread
+static const int kWheelStep = 10;  // distance percentage points a notch (5, the panel's step, felt too slow)
+
+bool WheelBlockInstalled() { return g_wheelBlock; }
+bool WheelZooming() { return g_wheelBlock && WheelZoom() && CameraOn() && !GamePaused(); }
+
+void PanelWheel(int delta) {
+    if ((g_wheel > 0 && delta < 0) || (g_wheel < 0 && delta > 0)) g_wheel = 0;  // turned back: from here
+    g_wheel += delta;
+    for (; g_wheel >= WHEEL_DELTA; g_wheel -= WHEEL_DELTA) PanelZoomStep(kWheelStep);
+    for (; g_wheel <= -WHEEL_DELTA; g_wheel += WHEEL_DELTA) PanelZoomStep(-kWheelStep);
+}
+
+// The game's GetRawInputData: the same packets, but a mouse packet's wheel turn is taken out while it zooms (the
+// rest of the packet, movement and buttons, is the game's as usual).
+static UINT WINAPI GameGetRawInputData(HRAWINPUT h, UINT command, LPVOID data, PUINT size, UINT headerSize) {
+    const UINT got = g_gameGetRawInputData(h, command, data, size, headerSize);
+    if (data && command == RID_INPUT && got != (UINT)-1 && got >= sizeof(RAWINPUTHEADER) + sizeof(RAWMOUSE)) {
+        RAWINPUT* ri = (RAWINPUT*)data;
+        if (ri->header.dwType == RIM_TYPEMOUSE && (ri->data.mouse.usButtonFlags & RI_MOUSE_WHEEL) && WheelZooming()) {
+            ri->data.mouse.usButtonFlags &= ~RI_MOUSE_WHEEL;
+            ri->data.mouse.usButtonData = 0;  // the turn (only the wheels use it)
+        }
+    }
+    return got;
+}
+
+// The slot's function is called from here on (user32's, or another mod's hook on it).
+bool InstallWheelBlockAt(void** slot, std::string& err) {
+    void* was = *slot;
+    if (!was) {
+        err = "the import slot is empty";
+        return false;
+    }
+    g_gameGetRawInputData = (GetRawInputDataFn)was;
+    MemoryBarrier();
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
+        err = "could not write the import slot";
+        return false;
+    }
+    InterlockedExchangePointer(slot, (void*)&GameGetRawInputData);
+    DWORD tmp = 0;
+    VirtualProtect(slot, sizeof(void*), old, &tmp);
+    g_wheelBlock = true;
+    return true;
+}
+
+bool InstallWheelBlock(const Image& img, std::string& err) {
+    const uint32_t slot = FindImportSlot(img, "user32.dll", "GetRawInputData");
+    if (!slot) {
+        err = "the game doesn't import GetRawInputData";
+        return false;
+    }
+    void** live = (void**)(g_gameBase + slot);
+    const void* user32 = (const void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetRawInputData");
+    Log("GetRawInputData import slot at +0x%x%s", slot, *live == user32 ? "" : " (already changed by another module)");
+    return InstallWheelBlockAt(live, err);
+}
+
 // ---- the window ----
 static bool ShiftDown() { return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0; }
 
@@ -345,7 +421,9 @@ static LRESULT CALLBACK PanelWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     const int b = MouseButton(ri.data.mouse, zk);
                     if (b) ZoomKeyEvent(b > 0);
                 }
-                break;  // the mouse always reaches the game
+                if ((ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) && WheelZooming())
+                    PanelWheel((SHORT)ri.data.mouse.usButtonData);
+                break;  // the mouse always reaches the game (without the wheel while it zooms)
             }
             if (ri.header.dwType != RIM_TYPEKEYBOARD) break;
             g_sawRawKeyboard = true;
@@ -398,6 +476,10 @@ static LRESULT CALLBACK PanelWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_KILLFOCUS:
             ZoomRelease();
+            break;
+        case WM_CLOSE:
+        case WM_DESTROY:
+            SaveIfDue(~0ull);  // a zoom step not saved yet (the game is quitting)
             break;
     }
     return CallWindowProcW(g_prevProc, h, msg, wp, lp);

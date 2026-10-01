@@ -25,6 +25,8 @@ bool LoadPristineImage(const std::wstring& exePath, Image& img, std::string& bui
     img.prefBase = oh->ImageBase;
     img.sizeOfImage = oh->SizeOfImage;
     if (img.sizeOfImage < 0x1000 || img.sizeOfImage > (1u << 30)) return false;
+    if (oh->NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT)
+        img.importRva = oh->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
     img.mem.assign(img.sizeOfImage, 0);
     const IMAGE_SECTION_HEADER* sh = (const IMAGE_SECTION_HEADER*)((const uint8_t*)oh + fh->SizeOfOptionalHeader);
     if ((const uint8_t*)(sh + fh->NumberOfSections) > d + n) return false;
@@ -111,6 +113,30 @@ uint32_t FindUnique(const Image& img, const char* what, const char* pattern, std
     std::vector<uint32_t> hits = FindPattern(img, p, 2);
     if (hits.size() == 1) return hits[0];
     err = std::string(what) + (hits.empty() ? ": signature not found" : ": signature matched more than once");
+    return 0;
+}
+
+// The file's import directory: one descriptor per DLL, whose name list (or, unbound, the slots themselves) holds the
+// names of the functions in slot order.
+uint32_t FindImportSlot(const Image& img, const char* dll, const char* func) {
+    auto named = [&](uint32_t rva, const char* name, bool anyCase) {
+        const size_t n = strlen(name) + 1;
+        if (!rva || !img.Contains(rva, (uint32_t)n)) return false;
+        const char* s = (const char*)&img.mem[rva];
+        return anyCase ? _strnicmp(s, name, n) == 0 : memcmp(s, name, n) == 0;
+    };
+    IMAGE_IMPORT_DESCRIPTOR d;
+    for (uint32_t at = img.importRva; at && img.Contains(at, sizeof(d)); at += sizeof(d)) {
+        memcpy(&d, &img.mem[at], sizeof(d));
+        if (!d.Name) break;
+        if (!named(d.Name, dll, true)) continue;
+        const uint32_t names = d.OriginalFirstThunk ? d.OriginalFirstThunk : d.FirstThunk;
+        for (uint32_t i = 0; img.Contains(names + 8 * i, 8); ++i) {
+            const uint64_t e = img.U64(names + 8 * i);
+            if (!e) break;
+            if (!(e >> 63) && named((uint32_t)e + 2, func, false)) return d.FirstThunk + 8 * i;  // skips the hint
+        }
+    }
     return 0;
 }
 
