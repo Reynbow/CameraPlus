@@ -44,7 +44,7 @@ struct Locked {
 
 // ---- rows ----
 enum Row { kOnOff, kEditing, kStyle, kDistance, kHeight, kSide, kPosY, kPosZ, kFov, kZoomKeyRow, kZoomModeRow,
-           kResetView, kDump, kIdleOn, kIdleAfter, kZoomPadRow, kJump, kWheelRow, kTouchRow, kRowKinds };
+           kResetView, kDump, kIdleOn, kIdleAfter, kZoomPadRow, kJump, kWheelRow, kTouchRow, kCombatDelay, kRowKinds };
 
 // The rows shown for the camera being edited; g_sel is a place in this list.
 static int Rows(int* out) {
@@ -56,7 +56,7 @@ static int Rows(int* out) {
     } else {
         for (int r : {kStyle, kDistance, kHeight, kSide, kPosY, kPosZ, kFov, kJump}) out[n++] = r;
     }
-    for (int r : {kZoomKeyRow, kZoomPadRow, kZoomModeRow, kWheelRow, kTouchRow, kResetView}) out[n++] = r;
+    for (int r : {kZoomKeyRow, kZoomPadRow, kZoomModeRow, kWheelRow, kTouchRow, kCombatDelay, kResetView}) out[n++] = r;
     if (g_cfg.diagnostics) out[n++] = kDump;
     return n;
 }
@@ -133,10 +133,16 @@ static void Change(int row, int dir, bool fine) {
             SetIdleAfter(dir ? Snap(IdleAfter() + dir * step, step) : 8.f);
             return;
         }
+        case kCombatDelay: {
+            const float step = fine ? 0.1f : 0.5f;
+            SetCombatEndDelay(dir ? Snap(CombatEndDelay() + dir * step, step) : 3.f);
+            return;
+        }
         case kResetView:
             if (g_edit == kIndoor) SetIndoorFollows(true);  // its fresh-install camera: the exploration one
             else SetView(g_edit, DefaultView(g_edit));
             if (g_edit == kIdle) SetIdleAfter(8.f), SetIdleEnabled(true);
+            if (g_edit == kCombat) SetCombatEndDelay(3.f);
             return;
         case kDump: RequestDump(); return;
     }
@@ -199,6 +205,7 @@ static std::string Value(int row) {
         case kTouchRow: return TouchZoom() ? "On" : "Off";
         case kIdleOn: return IdleEnabled() ? "On" : "Off";
         case kIdleAfter: sprintf_s(b, "%.1f s", IdleAfter()); return b;
+        case kCombatDelay: sprintf_s(b, "%.1f s", CombatEndDelay()); return b;
         case kResetView: return "Enter";
         case kDump: return "Enter";
     }
@@ -209,7 +216,7 @@ static std::string Label(int row) {
     static const char* names[] = {"CameraPlus", "Editing", "Style", "Distance", "Look-at height", "Side offset",
                                   "Position Y", "Position Z", "Field of view", "Zoom key", "Zoom", "",
                                   "Write values to log", "Idle zoom", "Idle after", "Zoom button", "Jump camera",
-                                  "Wheel zoom", "Touchpad zoom"};
+                                  "Wheel zoom", "Touchpad zoom", "Combat end delay"};
     if (row == kResetView) return std::string("Reset ") + ViewName(g_edit) + " camera";
     if (row == kDistance && g_edit == kIdle) return "Distance (of exploration)";
     return row >= 0 && row < kRowKinds ? names[row] : "";
@@ -246,6 +253,7 @@ static void Press(int vk, bool fine) {
             break;
         }
         case VK_DELETE: case VK_BACK: Change(RowAt(g_sel), 0, fine); break;
+        case 'I': SetKeyListShown(!KeyListShown()); break;  // the list of keys on the right
         default: break;  // any other key: kept from the game too while the panel is open
     }
     if (g_sel >= RowCount()) g_sel = RowCount() - 1;  // the idle camera has fewer rows
@@ -547,6 +555,12 @@ std::string PanelAction(const std::string& action, const char* query) {
     s += ",\"sel\":" + std::to_string(g_sel) + ",\"key\":\"" + JsonEscape(Utf8(g_cfg.panelKeyName)) + "\"";
     s += ",\"button\":\"" + JsonEscape(PadButtonName(PanelButton())) + "\",\"pad\":" + (g_lastPad ? "true" : "false");
     s += ",\"edit\":\"" + JsonEscape(ViewName(g_edit)) + "\",\"capture\":" + (g_capture ? "true" : "false");
+    // For the list of keys: what's bound, and what's on.
+    s += ",\"keyList\":" + std::string(KeyListShown() ? "true" : "false");
+    s += ",\"zoomKey\":\"" + JsonEscape(ZoomKey() ? KeyName(ZoomKey()) : "") + "\",\"zoomButton\":\"" +
+         JsonEscape(PadButtonName(ZoomButton())) + "\",\"zoomToggle\":" + (ZoomToggle() ? "true" : "false");
+    s += ",\"wheel\":" + std::string(WheelZoom() && WheelBlockInstalled() ? "true" : "false") +
+         ",\"touch\":" + (TouchZoom() ? "true" : "false");
     s += ",\"rows\":[";
     int rows[kRowKinds];
     const int n = Rows(rows);

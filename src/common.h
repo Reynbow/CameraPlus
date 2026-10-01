@@ -17,7 +17,7 @@ struct Image;
 extern HMODULE g_self;
 extern std::wstring g_modDir;   // folder holding cameraplus.dll, trailing backslash
 extern uintptr_t g_gameBase;    // live base of CONTROLResonant.exe
-extern bool g_knownBuild;       // the build the offsets were checked on (25472515)
+extern bool g_knownBuild;       // the build the offsets were checked on (25600401)
 
 // ---- logging (util.cpp) ----
 void LogInit();
@@ -140,12 +140,18 @@ bool WheelZoom();                    // the mouse wheel zooms in play
 void SetWheelZoom(bool on);
 bool TouchZoom();                    // a swipe on a PlayStation pad's touchpad zooms in play
 void SetTouchZoom(bool on);
+bool KeyListShown();                 // the list of keys on the right while the panel is open (I / Y hides it)
+void SetKeyListShown(bool on);
 // A wheel notch or touchpad step: the live camera's distance (the camera the panel shows while it's open) step
 // percentage points closer (+) or further (-), on the panel's 5% grid. False if it's already at the end. Saved a
 // moment later (SaveIfDue).
 bool StepDistance(int step);
 void SaveIfDue(ULONGLONG now);       // saves the cameras once the zoom steps have stopped for a moment
 void ReportCombat(bool combat);      // the HUD's combat flag, from the script
+float CombatEndDelay();              // seconds the combat camera stays after a fight (0: it switches at once)
+void SetCombatEndDelay(float s);
+bool InCombat();                     // the HUD says we're fighting
+bool CombatSettling();               // the fight is over, the combat end delay isn't
 void SetPreview(int v);              // the panel shows camera v live (-1: none)
 bool IdleEnabled();
 void SetIdleEnabled(bool on);
@@ -211,7 +217,13 @@ bool InstallCameraHookAt(uint8_t* blend, const uint8_t* prologue, std::string& e
 bool CameraHookInstalled();
 void SetTuningForTest(const Tuning& t, bool on);  // overrides the cameras and settles at once (no easing)
 void EndTuningTest();                              // back to the cameras (still no easing)
+void SetEaseForTest(bool on);                      // the cameras ease as in the game (tests of the easing)
 void RequestDump();  // the next tick writes the blended params to the log
+// The game's add and drop of a camera state request (the end of a fight keeps the game's fight camera a while).
+bool FindStateRequests(const Image& img, uint32_t& add, uint32_t& drop, std::string& err);
+bool InstallStateRequests(const Image& img, std::string& err);
+void UseStateRequestsForTest(void* add, void* drop);
+bool StateRequestsReady();
 
 // ---- the tuning panel (panel.cpp) ----
 // A panel on the left of the screen (CameraPlus.js draws it from PanelAction's status). While it is open the
@@ -248,6 +260,12 @@ const size_t kSize = 0x610;
 // Bytes select_set picks the set by: a mode and the camera state (camera_set_state_zone's zones in the levels ask for
 // one: 0x1427c0740 adds a zone's request when the player enters it, 0x1427c07f0 drops it when they leave).
 const size_t kMode = 0x0, kState = 0x1;
+// The state requests: a vector of 16-byte {entity, priority (u32), state (low byte of a u32)} sorted by priority,
+// highest first (a new one goes after equal ones), and its count. select_set takes the first one's state.
+const size_t kRequests = 0x40, kRequestCount = 0x48;
+// The state the game's fight camera uses (wide sets, distance x2): a zone asks for it while a fight is on and drops
+// the request as the last enemy dies (seen 0.06-0.2 s before the HUD's combat flag clears).
+const int kStateFight = 2;
 // int: the movement the set is for, as select_set picks it each frame (0x1427c3570): the number of the first bit of
 // {1 idle, 2 dodge, 3 dash, 4 jump, 5 sprint, 6 execution/reach, 7 carry, 8..10 lock-on} the state has a set for,
 // else 0. Jump: the Jump component's +0x15 is 2 and +0x14 isn't 4 (in the air after a jump).

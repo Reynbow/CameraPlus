@@ -1,9 +1,10 @@
 // The cameras (exploration, indoor, combat, zoom, idle), their styles, the zoom key and which camera is live.
 //
 // Live camera: the one being edited while the panel is open (so it can be seen); otherwise zoom while the zoom
-// key holds (or toggles) it, combat while the HUD says we're fighting (and for a short grace after), indoor while
-// the game's camera state is its indoor one (camera zones in the levels set it; the hook reports it every tick),
-// else exploration. The script reports the HUD's combat flag with every status read.
+// key holds (or toggles) it, combat while the HUD says we're fighting and for the combat end delay after (the game's
+// own fight camera is kept that long too, camera.cpp), indoor while the game's camera state is its indoor one (camera
+// zones in the levels set it; the hook reports it every tick), else exploration. The script reports the HUD's combat
+// flag with every status read.
 //
 // Idle: the game zooms in after you stand still a while by switching to an idle camera set, which fights our
 // changes (some of a set's values switch at once, the rest blend). We keep the game's idle timer at zero and do
@@ -51,16 +52,18 @@ static bool g_zoomToggle = false;
 static bool g_zoomHeld = false, g_zoomLatched = false;
 static int g_zoomPad = 0;          // the controller's zoom button (a place in the pad list)
 static bool g_zoomPadHeld = false;
-static bool g_combat = false;
-static ULONGLONG g_combatSeen = 0, g_combatReport = 0;
+static bool g_combat = false;         // the combat camera: a fight, then the combat end delay
+static ULONGLONG g_combatReport = 0;  // the last status read with the HUD's flag
+static ULONGLONG g_combatEnd = 0;     // when the HUD said the fight was over (0: still fighting)
+static float g_combatDelay = 3.f;     // seconds the combat camera stays after a fight
 static int g_preview = -1;  // the panel shows this camera
 static int g_lastLive = -1;
-static const ULONGLONG kCombatGraceMs = 2000;
 static bool g_idleOn = true;
 static float g_idleAfter = 8.f;  // seconds standing still, like the game's "Idle CameraSet Time"
 static float g_idleSecs = 0.f;
 static bool g_idle = false;
 static bool g_wheelZoom = true, g_touchZoom = true;
+static bool g_keyList = true;
 static volatile LONG64 g_saveAt = 0;  // when SaveIfDue saves the zoom steps' camera (0: nothing to save)
 static volatile LONG g_zoomed = -1;   // the camera the last zoom step changed
 static const ULONGLONG kZoomSaveMs = 1500;
@@ -227,6 +230,9 @@ void SetTouchZoom(bool on) {
     Log("Touchpad zoom %s", on ? "on" : "off");
 }
 
+bool KeyListShown() { return g_keyList; }
+void SetKeyListShown(bool on) { g_keyList = on; }
+
 bool StepDistance(int step) {
     const int v = Source(LiveView());
     AcquireSRWLockExclusive(&g_lock);
@@ -250,14 +256,42 @@ void SaveIfDue(ULONGLONG now) {
     if (v >= 0 && v < kViewCount) Log("%s camera distance %.0f%% (zoomed), saved", kViewNames[v], GetView(v).distMul * 100);
 }
 
+// The combat camera ends once the delay after a fight is over, or at once when the HUD stops reporting (a loading
+// screen, a cutscene).
+static void UpdateCombat(ULONGLONG now) {
+    if (!g_combat) return;
+    const bool noHud = now - g_combatReport > 3000;
+    if (noHud || (g_combatEnd && now - g_combatEnd >= (ULONGLONG)(g_combatDelay * 1000.f))) {
+        g_combat = false;
+        g_combatEnd = 0;
+        Log("combat camera off%s", noHud ? " (no HUD)" : "");
+    }
+}
+
 void ReportCombat(bool combat) {
     const ULONGLONG now = GetTickCount64();
     g_combatReport = now;
-    if (combat) g_combatSeen = now;
-    const bool was = g_combat;
-    g_combat = combat || (g_combat && now - g_combatSeen < kCombatGraceMs);
-    if (g_combat != was) Log("combat %s", g_combat ? "started" : "over");
+    if (combat) {
+        if (!g_combat || g_combatEnd) Log("combat %s", g_combat ? "again" : "started");
+        g_combat = true;
+        g_combatEnd = 0;
+    } else if (g_combat && !g_combatEnd) {
+        g_combatEnd = now;
+        Log("combat over: the combat camera stays %.1f s", g_combatDelay);
+    }
+    UpdateCombat(now);
 }
+
+bool InCombat() {
+    UpdateCombat(GetTickCount64());
+    return g_combat && !g_combatEnd;
+}
+bool CombatSettling() {
+    UpdateCombat(GetTickCount64());
+    return g_combat && g_combatEnd;
+}
+float CombatEndDelay() { return g_combatDelay; }
+void SetCombatEndDelay(float s) { g_combatDelay = std::min(10.f, std::max(0.f, s)); }
 
 void SetPreview(int v) { g_preview = v; }
 
@@ -278,9 +312,7 @@ void IdleTick(float add) {
 int LiveView() {
     if (g_preview >= 0) return g_preview;
     if (g_zoomToggle ? g_zoomLatched : (g_zoomHeld || g_zoomPadHeld)) return kZoom;
-    // No report for a while (no HUD, a loading screen): not fighting.
-    const ULONGLONG now = GetTickCount64();
-    if (g_combat && now - g_combatReport > 3000 && now - g_combatSeen > kCombatGraceMs) g_combat = false;
+    UpdateCombat(GetTickCount64());
     return g_combat ? kCombat : g_indoor ? kIndoor : kExploration;
 }
 
@@ -379,6 +411,7 @@ void LoadViews() {
     }
     g_combatFollows = ReadInt(L"Combat", L"SameAsExploration", 0) != 0;
     if (g_combatFollows) g_views[kCombat] = g_views[kExploration];
+    SetCombatEndDelay(ReadF(L"Combat", L"EndDelay", 3.f, 0, 10));
     g_indoorFollows = ReadInt(L"Indoor", L"SameAsExploration", 1) != 0;  // before 1.2.0 indoors was exploration
     if (g_indoorFollows) g_views[kIndoor] = g_views[kExploration];
     wchar_t buf[64];
@@ -390,6 +423,7 @@ void LoadViews() {
     g_zoomPad = zb >= 0 && zb < PadButtonCount() ? zb : 0;
     g_wheelZoom = ReadInt(L"CameraPlus", L"WheelZoom", 1) != 0;
     g_touchZoom = ReadInt(L"CameraPlus", L"TouchpadZoom", 1) != 0;
+    g_keyList = ReadInt(L"CameraPlus", L"KeyList", 1) != 0;
     g_idleOn = ReadInt(L"Idle", L"Enabled", 1) != 0;
     SetIdleAfter(ReadF(L"Idle", L"After", 8.f, 1, 120));
 }
@@ -428,6 +462,8 @@ void SaveViews() {
     WritePrivateProfileStringW(L"Combat", L"SameAsExploration", follows ? L"1" : L"0", ini.c_str());
     WritePrivateProfileStringW(L"Indoor", L"SameAsExploration", indoorFollows ? L"1" : L"0", ini.c_str());
     wchar_t b[16];
+    swprintf_s(b, L"%.1f", g_combatDelay);
+    WritePrivateProfileStringW(L"Combat", L"EndDelay", b, ini.c_str());
     swprintf_s(b, L"0x%02X", g_zoomKey);
     const wchar_t* name = g_zoomKey == VK_XBUTTON1 ? L"Mouse4" : g_zoomKey == VK_XBUTTON2 ? L"Mouse5"
                         : g_zoomKey == VK_MBUTTON ? L"MouseMiddle" : g_zoomKey == VK_RBUTTON ? L"MouseRight"
@@ -438,6 +474,7 @@ void SaveViews() {
     WritePrivateProfileStringW(L"CameraPlus", L"ZoomButton", b, ini.c_str());
     WritePrivateProfileStringW(L"CameraPlus", L"WheelZoom", g_wheelZoom ? L"1" : L"0", ini.c_str());
     WritePrivateProfileStringW(L"CameraPlus", L"TouchpadZoom", g_touchZoom ? L"1" : L"0", ini.c_str());
+    WritePrivateProfileStringW(L"CameraPlus", L"KeyList", g_keyList ? L"1" : L"0", ini.c_str());
     WritePrivateProfileStringW(L"Idle", L"Enabled", g_idleOn ? L"1" : L"0", ini.c_str());
     swprintf_s(b, L"%.1f", g_idleAfter);
     WritePrivateProfileStringW(L"Idle", L"After", b, ini.c_str());
@@ -459,9 +496,12 @@ void ResetViewsForTest() {
     g_zoomPad = 0;
     g_zoomPadHeld = false;
     g_wheelZoom = g_touchZoom = true;
+    g_keyList = true;
     g_saveAt = 0;
     g_zoomed = -1;
     g_combat = false;
+    g_combatEnd = 0;
+    g_combatDelay = 3.f;
     g_preview = -1;
 }
 

@@ -455,7 +455,7 @@ static bool GameHasFocus() {
 
 // ---- the panel's controller ----
 // D-pad up/down picks a row and left/right changes it (held: repeats; with LB held: finer steps), A selects, X puts
-// the row back to the game's value, B closes. The panel button opens it during play; pressed again it closes the
+// the row back to the game's value, Y hides or shows the list of buttons, B closes. The panel button opens it during play; pressed again it closes the
 // panel, unless it's one of those controls. While the panel waits for a zoom button, the next button is it (B
 // cancels).
 struct Repeat { ULONGLONG since = 0, last = 0; };
@@ -497,9 +497,10 @@ static void PanelTick(uint32_t buttons, uint32_t prev, ULONGLONG now, Repeat* re
     }
     if (edge & Bit(kA)) PanelPadKey(VK_RETURN, fine);
     if (edge & Bit(kX)) PanelPadKey(VK_DELETE, fine);
+    if (edge & Bit(kY)) PanelPadKey('I', fine);  // the list of buttons on the right
     if (edge & Bit(kB)) PanelPadKey(VK_ESCAPE, fine);
     const bool navButton = open == kUp || open == kDown || open == kLeft || open == kRight || open == kA ||
-                           open == kX || open == kB || open == kLB;
+                           open == kX || open == kY || open == kB || open == kLB;
     if (open && !navButton && (edge & Bit(open)) && PanelOpen()) PanelToggleFromPad();
 }
 

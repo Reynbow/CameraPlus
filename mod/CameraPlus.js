@@ -1,5 +1,6 @@
 // CameraPlus: the tuning panel. cameraplus.dll owns the panel (rows, values, keys, the controller); this script
-// draws it on the left of the screen from the DLL's status, and redraws when the status's serial changes. It also
+// draws it on the left of the screen, with the list of keys on the right, from the DLL's status, and redraws when the
+// status's serial changes. It also
 // passes the HUD's combat flag to the DLL, and on the MODS page shows the panel key's and button's names next to
 // their sliders and tells the DLL when they move.
 (function () {
@@ -16,6 +17,7 @@
     var PAD = C.pad || [];    // the Panel button slider's button names, by position (0 = Off)
     var OPEN_MS = 50, CLOSED_MS = 150;  // how often the status is read, with the panel open / closed
     var YELLOW = '#fbe732';             // the game's objective yellow (RadarPlus uses it too)
+    var V = function (px) { return (px / 10.8).toFixed(5) + 'vh'; };  // 1080p pixels to vh
     var CSS =
         '.cp-panel{position:absolute;left:3.7037037037vh;top:50%;transform:translateY(-50%);width:44.444444vh;' +
         'padding:2.2222222vh 2.2222222vh 1.8518518vh;box-sizing:border-box;background-color:rgba(13,13,13,0.95);' +
@@ -30,7 +32,20 @@
         '.cp-value{display:flex;flex-direction:row;align-items:center;font-variant-numeric:tabular-nums;white-space:nowrap}' +
         '.cp-arrow--left{margin-right:0.9259259vh}.cp-arrow--right{margin-left:0.9259259vh}' +
         '.cp-hint{margin-top:1.6666667vh;font-size:1.4814815vh;line-height:2.2222222vh;opacity:0.6}' +
-        '.cp-hidden{display:none !important}';
+        '.cp-hidden{display:none !important}' +
+        // The list of keys (right), as MusicVideo's editor has it.
+        '.cp-keys{position:absolute;right:3.7037037037vh;top:50%;transform:translateY(-50%);width:' + V(440) + ';' +
+        'padding:' + V(18) + ' ' + V(20) + ' ' + V(10) + ';box-sizing:border-box;background-color:rgba(13,13,13,0.95);' +
+        'border-right:0.37037037vh solid rgb(232,232,232);color:rgb(232,232,232);z-index:100000;pointer-events:none}' +
+        '.cp-kgroup{margin-bottom:' + V(12) + '}' +
+        '.cp-ktitle{font-size:' + V(13) + ';letter-spacing:' + V(3) + ';font-weight:700;color:' + YELLOW + ';margin-bottom:' + V(6) + '}' +
+        '.cp-krow{display:flex;flex-direction:row;align-items:center;height:' + V(24) + '}' +
+        '.cp-kkeys{display:flex;flex-direction:row;align-items:center;width:' + V(170) + ';flex-shrink:0}' +
+        '.cp-kcap{display:flex;flex-direction:row;align-items:center;justify-content:center;min-width:' + V(21) + ';height:' + V(19) + ';' +
+        'padding:0 ' + V(5) + ';margin-right:' + V(4) + ';box-sizing:border-box;border:1px solid rgba(232,232,232,0.55);' +
+        'border-radius:' + V(3) + ';background-color:rgba(232,232,232,0.12);font-size:' + V(12) + ';font-weight:700;white-space:nowrap}' +
+        '.cp-kor{font-size:' + V(12) + ';opacity:0.55;margin-right:' + V(4) + ';white-space:nowrap}' +
+        '.cp-kdesc{font-size:' + V(15) + ';white-space:nowrap}';
 
     var logCount = 0;
     function log(msg) {
@@ -53,10 +68,10 @@
     function hex(s) { var o = ''; for (var i = 0; i < s.length; i++) o += ('0' + s.charCodeAt(i).toString(16)).slice(-2); return o; }
 
     // ---------------------------------------------------------------- the panel
-    var panel = null, lastSerial = -1;
+    var panel = null, keys = null, lastSerial = -1;
 
     function ensure() {
-        if (panel && connected(panel)) return panel;
+        if (panel && keys && connected(panel) && connected(keys)) return panel;
         if (!document.body) return null;
         if (!document.getElementById('cp-style')) {
             var st = el('style');
@@ -64,8 +79,12 @@
             st.textContent = CSS;
             (document.head || document.body).appendChild(st);
         }
+        remove(panel);
+        remove(keys);
         panel = el('div', 'cp-panel cp-hidden');
+        keys = el('div', 'cp-keys cp-hidden');
         document.body.appendChild(panel);
+        document.body.appendChild(keys);
         lastSerial = -1;
         return panel;
     }
@@ -77,13 +96,61 @@
             return;
         }
         p.appendChild(el('div', 'cp-hint', 'Showing the ' + (s.edit || '') + ' camera while this is open'));
+        if (s.keyList === false) p.appendChild(el('div', 'cp-hint', s.pad ? 'Y: show the buttons' : 'I: show the keys'));
+    }
+
+    // ---------------------------------------------------------------- the list of keys (right)
+    // Each row: key caps ({w: ...} is a plain word between them), then what they do. The keyboard's keys or the
+    // controller's buttons, whichever drove the panel last; the panel and zoom keys and buttons are the ones set, and
+    // the wheel and touchpad show while they zoom.
+    function keyGroups(s) {
+        var here, play = [];
         if (s.pad) {
-            p.appendChild(el('div', 'cp-hint', 'D-pad: choose and change · hold LB: finer'));
-            p.appendChild(el('div', 'cp-hint', 'A: select · X: game value · B: close'));
+            here = [[['D-pad', { w: 'up / down' }], 'Choose a setting'],
+                [['D-pad', { w: 'left / right' }], 'Change it'],
+                [['LB'], 'Finer steps (hold)'],
+                [['A'], 'Set a button, switch, reset'],
+                [['X'], "Back to the game's value"],
+                [['Sticks'], 'Move and look while you tune']];
+            if (s.touch) here.push([['Touchpad'], "Swipe: this camera's distance"]);
+            here.push([['Y'], 'Hide this list'], [['B'], 'Close']);
+            if (s.zoomButton) play.push([[s.zoomButton], s.zoomToggle ? 'Zoom on / off' : 'Zoom (hold)']);
+            if (s.touch) play.push([['Touchpad'], 'Swipe: camera closer / further']);
+            if (s.button) play.push([[s.button], 'Open this panel']);
         } else {
-            p.appendChild(el('div', 'cp-hint', 'Up / Down: choose · Left / Right: change · Shift: finer'));
-            p.appendChild(el('div', 'cp-hint', 'Delete: game value · ' + (s.key || 'F1') + ' / Esc: close'));
+            here = [[['Up', 'Down'], 'Choose a setting'],
+                [['Left', 'Right'], 'Change it'],
+                [['Shift'], 'Finer steps (hold)'],
+                [['Enter'], 'Set a key, switch, reset'],
+                [['Delete'], "Back to the game's value"],
+                [['Mouse'], 'Look around while you tune']];
+            if (s.wheel) here.push([['Wheel'], "This camera's distance"]);
+            here.push([['I'], 'Hide this list'], [[s.key || 'F1', { w: 'or' }, 'Esc'], 'Close']);
+            if (s.zoomKey) play.push([[s.zoomKey], s.zoomToggle ? 'Zoom on / off' : 'Zoom (hold)']);
+            if (s.wheel) play.push([['Wheel'], 'Camera closer / further']);
+            if (s.key) play.push([[s.key], 'Open this panel']);
         }
+        return [{ title: 'THIS PANEL', rows: here }, { title: 'IN PLAY', rows: play }];
+    }
+
+    function renderKeys(s) {
+        while (keys.firstChild) keys.removeChild(keys.firstChild);
+        keyGroups(s).forEach(function (g) {
+            if (!g.rows.length) return;
+            var group = el('div', 'cp-kgroup');
+            group.appendChild(el('div', 'cp-ktitle', g.title));
+            g.rows.forEach(function (r) {
+                var row = el('div', 'cp-krow'), caps = el('div', 'cp-kkeys');
+                r[0].forEach(function (k) {
+                    caps.appendChild(typeof k === 'string' ? el('div', 'cp-kcap', k) : el('div', 'cp-kor', k.w));
+                });
+                row.appendChild(caps);
+                row.appendChild(el('div', 'cp-kdesc', r[1]));
+                group.appendChild(row);
+            });
+            keys.appendChild(group);
+        });
+        keys.className = s.keyList === false ? 'cp-keys cp-hidden' : 'cp-keys';
     }
 
     function render(s) {
@@ -91,6 +158,7 @@
         if (!p) return;
         if (!s.open) {
             if (p.className.indexOf('cp-hidden') < 0) p.className = 'cp-panel cp-hidden';
+            if (keys.className.indexOf('cp-hidden') < 0) keys.className = 'cp-keys cp-hidden';
             lastSerial = s.serial;
             return;
         }
@@ -114,6 +182,7 @@
         });
         hints(p, s);
         p.className = 'cp-panel';
+        renderKeys(s);
     }
 
     // ---------------------------------------------------------------- the MODS page

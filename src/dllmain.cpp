@@ -9,7 +9,7 @@ std::wstring g_modDir;
 uintptr_t g_gameBase = 0;
 bool g_knownBuild = false;
 
-static const char* kKnownBuildId = "6ab107a0-06301000-05eedcbd";  // build 25472515
+static const char* kKnownBuildId = "6aba5bb8-063da000-05fbdb88";  // build 25600401
 
 static void Setup() {
     LoadConfig();
@@ -42,22 +42,27 @@ static void Setup() {
         return;
     }
     g_knownBuild = build == kKnownBuildId;
-    Log("Game build %s (%s)", build.c_str(), g_knownBuild ? "known build 25472515" : "other build; running on signatures");
+    Log("Game build %s (%s)", build.c_str(), g_knownBuild ? "known build 25600401" : "other build; running on signatures");
     for (int v = 0; v < kViewCount; ++v) {
         const Tuning t = GetView(v);
         const int st = ViewStyle(v);
         Log("%s camera: %s, dist x%.3f side %+.2f look-at %+.2f fov %+.1f", ViewName(v),
             st == -2 ? "same as exploration" : StyleName(st), t.distMul, t.posAdd[0], t.targetAdd[1], t.fovAdd);
     }
-    Log("Settings: diagnostics=%d, panel key %s, zoom key %s (%s), wheel zoom %s, touchpad zoom %s", g_cfg.diagnostics,
-        Utf8(g_cfg.panelKeyName).c_str(), KeyName(ZoomKey()).c_str(), ZoomToggle() ? "toggle" : "hold",
-        WheelZoom() ? "on" : "off", TouchZoom() ? "on" : "off");
+    Log("Settings: diagnostics=%d, panel key %s, zoom key %s (%s), wheel zoom %s, touchpad zoom %s, combat end delay "
+        "%.1f s", g_cfg.diagnostics, Utf8(g_cfg.panelKeyName).c_str(), KeyName(ZoomKey()).c_str(),
+        ZoomToggle() ? "toggle" : "hold", WheelZoom() ? "on" : "off", TouchZoom() ? "on" : "off", CombatEndDelay());
 
     std::string err;
     if (!InstallCameraHook(img, err)) {
         Log("Camera hook off: %s. CameraPlus stays off on this game version.", err.c_str());
         return;
     }
+    // The end of a fight: the game's add and drop of camera state requests, to keep its fight camera for the combat
+    // end delay. Optional.
+    err.clear();
+    if (!InstallStateRequests(img, err))
+        Log("Fight camera hold off: %s. The game's fight camera ends with the fight.", err.c_str());
     // Controllers: the game's pause flag (the panel and zoom buttons are the game's in menus) and the hook that keeps
     // controller presses from the game while the panel is open. Both optional.
     CameraTargets targets;

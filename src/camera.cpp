@@ -15,6 +15,9 @@
 // picks a new set (a new id at +0xc). Each tick, before the blend, a field that no longer holds what we wrote (or
 // every field, after a new set id) is the game's new value: we keep it and write ours over it. Our changes ease
 // (settings.cpp), so the target is rewritten every tick.
+//
+// The camera systems run on the game's fixed tick (FixedTime, about 30 a second: one tick after one or two drawn
+// frames), so the easing goes by that tick's time too.
 #include "common.h"
 #include <cmath>
 
@@ -64,6 +67,8 @@ struct Slot {
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static Slot g_slot;
 static Tuning g_cur;         // eased toward the live camera (settings.cpp), or the identity while off
+static const int kEased = 9; // g_cur's values (Eased)
+static float g_vel[kEased];  // how fast each is moving
 static bool g_ease = true;   // off in the tests: changes land at once
 static bool g_testOverride = false;  // tests: g_testTarget / g_testOn instead of the cameras
 static Tuning g_testTarget;
@@ -94,40 +99,67 @@ static Slot* SlotFor(uint8_t* p) {
 }
 
 // ---- easing ----
-static float Toward(float cur, float want, float k) { return cur + (want - cur) * k; }
+// Each value moves toward the live camera's like a critically damped spring: it sets off and arrives gently and never
+// overshoots, so a change that starts at once (the zoom key) doesn't jerk, and a target that keeps moving (the wheel)
+// is followed smoothly. smooth is about the time it takes.
+static float Spring(float cur, float want, float& vel, float smooth, float dt) {
+    const float omega = 2.f / std::max(smooth, 1e-3f);
+    const float x = omega * dt;
+    const float e = 1.f / (1.f + x + 0.48f * x * x + 0.235f * x * x * x);
+    const float change = cur - want;
+    const float temp = (vel + omega * change) * dt;
+    vel = (vel - omega * temp) * e;
+    float out = want + (change + temp) * e;
+    if ((change < 0) == (out > want)) {  // there (or past it)
+        out = want;
+        vel = 0;
+    }
+    return out;
+}
 
-static void Ease() {
+static float* Eased(Tuning& t, int i) {
+    switch (i) {
+        case 0: return &t.fovAdd;
+        case 1: return &t.distMul;
+        case 2: return &t.jump;
+    }
+    return i < 6 ? &t.posAdd[i - 3] : &t.targetAdd[i - 6];
+}
+
+// tick: the game's time step (FixedTime). Timing the easing by the wall clock instead (21 ms, then 42 ms between
+// ticks, as the ticks fall on every other drawn frame) moved the camera unevenly from tick to tick: a stutter in
+// quick changes like the zoom.
+static void Ease(float tick) {
     LARGE_INTEGER now, freq;
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&freq);
-    float dt = g_lastEase.QuadPart ? (float)(now.QuadPart - g_lastEase.QuadPart) / (float)freq.QuadPart : 1.f;
+    float dt = g_lastEase.QuadPart ? (float)(now.QuadPart - g_lastEase.QuadPart) / (float)freq.QuadPart : 0.f;
     g_lastEase = now;
+    if (tick > 0.f && tick < 0.5f) dt = tick;
+    dt = std::min(dt, 0.5f);
     Tuning want;
-    float tau = 0.2f;
+    float smooth = 0.2f;
     if (g_testOverride) {
         if (g_testOn) want = g_testTarget;
     } else {
-        LiveTarget(want, tau);
+        LiveTarget(want, smooth);
     }
     if (!g_ease) {
         g_cur = want;
+        memset(g_vel, 0, sizeof(g_vel));
         return;
     }
-    const float k = 1.f - expf(-std::min(dt, 1.f) / tau);
-    g_cur.fovAdd = Toward(g_cur.fovAdd, want.fovAdd, k);
-    g_cur.distMul = Toward(g_cur.distMul, want.distMul, k);
-    g_cur.jump = Toward(g_cur.jump, want.jump, k);
-    for (int i = 0; i < 3; ++i) {
-        g_cur.posAdd[i] = Toward(g_cur.posAdd[i], want.posAdd[i], k);
-        g_cur.targetAdd[i] = Toward(g_cur.targetAdd[i], want.targetAdd[i], k);
+    bool there = true;
+    for (int i = 0; i < kEased; ++i) {
+        float* c = Eased(g_cur, i);
+        const float w = *Eased(want, i);
+        *c = Spring(*c, w, g_vel[i], smooth, dt);
+        there = there && fabsf(*c - w) < (i == 0 ? 1e-3f : 1e-4f) && fabsf(g_vel[i]) < 1e-3f;
     }
-    // Snap the last hair so "off" is exactly the game's camera.
-    if (fabsf(g_cur.fovAdd - want.fovAdd) < 1e-3f && fabsf(g_cur.distMul - want.distMul) < 1e-4f &&
-        fabsf(g_cur.jump - want.jump) < 1e-4f &&
-        fabsf(g_cur.posAdd[0] - want.posAdd[0]) < 1e-4f && fabsf(g_cur.posAdd[1] - want.posAdd[1]) < 1e-4f &&
-        fabsf(g_cur.posAdd[2] - want.posAdd[2]) < 1e-4f && fabsf(g_cur.targetAdd[0] - want.targetAdd[0]) < 1e-4f &&
-        fabsf(g_cur.targetAdd[1] - want.targetAdd[1]) < 1e-4f && fabsf(g_cur.targetAdd[2] - want.targetAdd[2]) < 1e-4f)
+    if (there) {  // exactly the live camera ("off" is exactly the game's camera)
         g_cur = want;
+        memset(g_vel, 0, sizeof(g_vel));
+    }
 }
 
 // The game's values -> ours, field by field (kFields order).
@@ -270,6 +302,89 @@ static void ApplyTarget(Slot& s) {
     s.valid = true;
 }
 
+// ---- the end of a fight ----
+// The game's fight camera (camera state 2: wide sets, distance x2) comes from a camera state zone that asks for it
+// while a fight is on, and drops its request as the last enemy dies, a moment before the HUD says the fight is over:
+// the camera zoomed in at once, whatever the combat end delay. So while a fight is on CameraPlus keeps a request of
+// its own for that state beside the zone's (same priority, after it), which keeps the state when the zone's goes,
+// until the combat end delay is over. Then it drops it and the game blends to its usual camera itself, as the
+// combat camera switches back to the exploration camera. The game's own add and drop are used (its allocator grows
+// the vector); the zone system and update_blending both write OutputData, so they never run at the same time.
+struct StateRequest {
+    uint64_t entity;
+    uint32_t priority;
+    uint32_t state;  // the low byte
+};
+using AddRequestFn = void (*)(uint8_t* od, const StateRequest* r);
+using DropRequestFn = void (*)(uint8_t* od, uint64_t entity);
+static AddRequestFn g_addRequest = nullptr;
+static DropRequestFn g_dropRequest = nullptr;
+static const uint64_t kOurRequest = 0x2153554C504D4143ull;  // "CAMPLUS!", not an entity
+static ULONGLONG g_zoneGone = 0;  // when the zone's request went while the HUD still said fighting (0: it didn't)
+
+static const char* kAddRequestSig = "40 53 48 83 EC 20 48 8B 41 40 48 8D 59 40 8B 49 48 4C 8B DA 48 C1 E1 04 48 03 C8";
+static const char* kDropRequestSig = "48 89 54 24 10 53 48 83 EC 20 48 8B D9 33 C9 44 8B 4B 48 45 8B D9 4D 03 DB";
+
+bool FindStateRequests(const Image& img, uint32_t& add, uint32_t& drop, std::string& err) {
+    add = FindUnique(img, "state request add", kAddRequestSig, err);
+    drop = add ? FindUnique(img, "state request drop", kDropRequestSig, err) : 0;
+    return add && drop;
+}
+
+bool InstallStateRequests(const Image& img, std::string& err) {
+    uint32_t add = 0, drop = 0;
+    if (!FindStateRequests(img, add, drop, err)) return false;
+    Log("state requests: add +0x%x, drop +0x%x", add, drop);
+    UseStateRequestsForTest((void*)(g_gameBase + add), (void*)(g_gameBase + drop));
+    return true;
+}
+
+void UseStateRequestsForTest(void* add, void* drop) {
+    AcquireSRWLockExclusive(&g_lock);
+    g_addRequest = (AddRequestFn)add;
+    g_dropRequest = (DropRequestFn)drop;
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+bool StateRequestsReady() { return g_addRequest && g_dropRequest; }
+
+static void KeepFightState(Slot& s) {
+    if (!g_addRequest || !g_dropRequest) return;
+    uint8_t* p = s.od;
+    const StateRequest* list = *(const StateRequest* const*)(p + od::kRequests);
+    const uint32_t n = *(const uint32_t*)(p + od::kRequestCount);
+    if (n && !list) return;
+    bool ours = false, zone = false;
+    uint32_t priority = 0;
+    for (uint32_t i = 0; i < n && i < 64; ++i) {
+        if (list[i].entity == kOurRequest) ours = true;
+        else if ((uint8_t)list[i].state == od::kStateFight && !zone) zone = true, priority = list[i].priority;
+    }
+    const bool fighting = InCombat(), settling = CombatSettling();
+    bool keep = false;
+    if (CameraOn() && !g_testOverride && CombatEndDelay() > 0.f) {
+        if (zone) {
+            g_zoneGone = 0;
+            keep = fighting || settling;
+        } else if (ours && fighting) {  // the zone's went: the HUD should say the fight is over in a moment
+            const ULONGLONG now = GetTickCount64();
+            if (!g_zoneGone) g_zoneGone = now;
+            keep = now - g_zoneGone < 1500;  // still fighting after that: a zone left mid-fight, let it go
+        } else {
+            keep = ours && settling;
+        }
+    }
+    if (keep && !ours && zone) {
+        const StateRequest r{kOurRequest, priority, (uint32_t)od::kStateFight};
+        g_addRequest(p, &r);
+        if (g_cfg.diagnostics) Log("fight camera: kept beside the zone's (priority %u)", priority);
+    } else if (!keep && ours) {
+        g_dropRequest(p, kOurRequest);
+        g_zoneGone = 0;
+        if (g_cfg.diagnostics) Log("fight camera: let go");
+    }
+}
+
 static Slot* Enter(void* entity) {
     uint8_t* p = OutputOf(entity);
     return p ? SlotFor(p) : nullptr;
@@ -283,8 +398,9 @@ static void HookBlend(void* entity, void* time, void* state) {
         if (s) {
             TakeIdleTimer(*s);
             ReportCameraState(s->od[od::kState]);  // the indoor camera
-            Ease();
+            Ease(time ? *(const float*)time : 0.f);  // FixedTime starts with the tick's time step
             ApplyTarget(*s);
+            KeepFightState(*s);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (s) s->valid = false;
@@ -329,6 +445,14 @@ void EndTuningTest() {
     AcquireSRWLockExclusive(&g_lock);
     g_testOverride = false;
     g_ease = false;
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+void SetEaseForTest(bool on) {
+    AcquireSRWLockExclusive(&g_lock);
+    g_ease = on;
+    memset(g_vel, 0, sizeof(g_vel));
+    g_lastEase.QuadPart = 0;
     ReleaseSRWLockExclusive(&g_lock);
 }
 
