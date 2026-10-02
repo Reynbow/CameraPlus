@@ -460,14 +460,30 @@ static bool GameHasFocus() {
 // cancels).
 struct Repeat { ULONGLONG since = 0, last = 0; };
 
+// The buttons held as the panel opened: ignored until they're let go. The panel button is D-pad Left by default, which
+// also changes the selected row's value; still held on the next poll, its repeat (timed from a stale start) changed the
+// value at once.
+static uint32_t g_swallow = 0;
+static bool g_wasOpen = false;
+
 static void PanelTick(uint32_t buttons, uint32_t prev, ULONGLONG now, Repeat* rep) {
-    const uint32_t edge = buttons & ~prev;
+    uint32_t edge = buttons & ~prev;
     const int open = g_openButton.load();
     const bool paused = GamePaused();
     if (!PanelOpen()) {
+        g_wasOpen = false;
         if (open && (edge & Bit(open)) && !paused) PanelToggleFromPad();
+        if (!PanelOpen()) return;
+    }
+    if (!g_wasOpen) {  // just opened (by this button, or the keyboard): what's held now waits for a new press
+        g_wasOpen = true;
+        g_swallow = buttons;
+        for (int i = 0; i < 4; ++i) rep[i] = Repeat();
         return;
     }
+    g_swallow &= buttons;  // let go: counts again
+    buttons &= ~g_swallow;
+    edge &= ~g_swallow;
     if (PanelCapturing()) {  // a zoom button: the first new press (this poll's edges came after the capture began)
         for (int b = 1; b < kPadCount; ++b)
             if (edge & Bit(b)) {
