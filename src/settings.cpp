@@ -3,7 +3,8 @@
 // Live camera: the one being edited while the panel is open (so it can be seen); otherwise zoom while the zoom
 // key holds (or toggles) it, combat while the HUD says we're fighting and for the combat end delay after (the game's
 // own fight camera is kept that long too, camera.cpp), indoor while the game's camera state is its indoor one (camera
-// zones in the levels set it; the hook reports it every tick), else exploration. The script reports the HUD's combat
+// zones in the levels set it) or the player is in a mode with its own sets (since the game's 1 October update most
+// buildings: SpecialPlayerMode; the hook reports both every tick), else exploration. The script reports the HUD's combat
 // flag with every status read.
 //
 // Idle: the game zooms in after you stand still a while by switching to an idle camera set, which fights our
@@ -173,9 +174,10 @@ void SetIndoorFollows(bool on) {
     Log("Indoor camera: %s", on ? "same as exploration" : "its own");
 }
 
-void ReportCameraState(int state) {
-    const bool indoor = state == kStateIndoor;
-    if (indoor != g_indoor) Log("%s (camera state %d)", indoor ? "indoors" : "indoors over", state);
+void ReportCameraState(int state, int playerMode) {
+    const bool indoor = state == kStateIndoor || SpecialPlayerMode(playerMode);
+    if (indoor != g_indoor)
+        Log("%s (camera state %d, player mode 0x%x)", indoor ? "indoors" : "indoors over", state, playerMode);
     g_indoor = indoor;
 }
 
@@ -392,6 +394,56 @@ static float ReadF(const wchar_t* sec, const wchar_t* key, float def, float lo, 
     return std::min(hi, std::max(lo, v));
 }
 
+// ---- the usual camera for indoors (camera.cpp) ----
+// Indoors every camera is framed like the walking set last seen (UsualFrame); it's kept here between starts, because a
+// game loaded inside a building has seen no usual set yet.
+static const wchar_t* kUsualKeys[14] = {L"Fov",       L"Distance",  L"DefaultX",  L"DefaultY", L"DefaultZ",
+                                        L"SafeX",     L"SafeY",     L"SafeZ",     L"FallbackX", L"FallbackY",
+                                        L"FallbackZ", L"TargetX",   L"TargetY",   L"TargetZ"};
+static UsualFrame g_savedUsual;  // what the file holds
+static SRWLOCK g_usualSave = SRWLOCK_INIT;
+
+void SaveUsualCamera() {
+    UsualFrame f;
+    if (!GetUsualFrame(f)) return;
+    AcquireSRWLockExclusive(&g_usualSave);
+    if (memcmp(&f, &g_savedUsual, sizeof(f)) != 0) {
+        const std::wstring ini = StatePath();
+        wchar_t b[32];
+        swprintf_s(b, L"%08x", f.set);
+        WritePrivateProfileStringW(L"UsualCamera", L"Set", b, ini.c_str());
+        for (int i = 0; i < 14; ++i) {
+            swprintf_s(b, L"%.6f", f.values[i]);
+            WritePrivateProfileStringW(L"UsualCamera", kUsualKeys[i], b, ini.c_str());
+        }
+        swprintf_s(b, L"%.6f", f.dist);
+        WritePrivateProfileStringW(L"UsualCamera", L"Length", b, ini.c_str());
+        g_savedUsual = f;
+    }
+    ReleaseSRWLockExclusive(&g_usualSave);
+}
+
+static void LoadUsualCamera() {
+    const std::wstring ini = StatePath();
+    auto read = [&](const wchar_t* key, float& out) {
+        wchar_t buf[64];
+        GetPrivateProfileStringW(L"UsualCamera", key, L"", buf, 64, ini.c_str());
+        wchar_t* end = nullptr;
+        out = buf[0] ? wcstof(buf, &end) : 0.f;
+        return buf[0] && end != buf && out == out;
+    };
+    wchar_t set[32];
+    GetPrivateProfileStringW(L"UsualCamera", L"Set", L"", set, 32, ini.c_str());
+    if (!set[0]) return;
+    UsualFrame f;
+    f.set = wcstoul(set, nullptr, 16);
+    bool ok = read(L"Length", f.dist) && f.dist > 0;
+    for (int i = 0; i < 14 && ok; ++i) ok = read(kUsualKeys[i], f.values[i]);
+    if (!ok || !(f.values[0] > 0) || !(f.values[1] > 0)) return;
+    SetUsualFrame(f);
+    g_savedUsual = f;
+}
+
 void LoadViews() {
     for (int v = 0; v < kViewCount; ++v) {
         const Tuning d = DefaultView(v);
@@ -426,6 +478,7 @@ void LoadViews() {
     g_keyList = ReadInt(L"CameraPlus", L"KeyList", 1) != 0;
     g_idleOn = ReadInt(L"Idle", L"Enabled", 1) != 0;
     SetIdleAfter(ReadF(L"Idle", L"After", 8.f, 1, 120));
+    LoadUsualCamera();
 }
 
 void SaveViews() {
@@ -479,6 +532,7 @@ void SaveViews() {
     swprintf_s(b, L"%.1f", g_idleAfter);
     WritePrivateProfileStringW(L"Idle", L"After", b, ini.c_str());
     ReleaseSRWLockExclusive(&saving);
+    SaveUsualCamera();
 }
 
 void ResetViewsForTest() {

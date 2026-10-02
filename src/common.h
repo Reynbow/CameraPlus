@@ -124,7 +124,12 @@ void SetIndoorFollows(bool on);
 // The game's camera state (OutputData+1), which camera zones in the levels set; 1 is the indoor one (a closer,
 // narrower set), 2 a wide one (big rooms, fights), 0 the rest.
 const int kStateIndoor = 1;
-void ReportCameraState(int state);
+// The player mode select_set matched (OutputData+8): flags of the player's status (player_status::Status, set by
+// update_player_mode): 1 Adventure (exploring), 2 Combat (and the camera tables' fallback), 4 Story, 8 Flashback,
+// 0x10 GameplayConversation... Since the game's 1 October update its tighter indoor camera mostly comes from a mode
+// other than exploring or combat (the mode's own camera sets), not from the camera state.
+inline bool SpecialPlayerMode(int m) { return m != 0 && (m & 3) == 0; }
+void ReportCameraState(int state, int playerMode);  // indoors: the indoor state, or a special player mode
 bool CameraOn();
 void SetCameraOn(bool on);
 int ZoomKey();
@@ -166,6 +171,7 @@ float JumpForDistance(float distMul);
 std::string KeyName(int vk);
 void LoadViews();
 void SaveViews();
+void SaveUsualCamera();  // the walking set's framing for the next start, if it changed (also done by SaveViews)
 void ResetViewsForTest();
 
 // ---- pristine game image (image.cpp) ----
@@ -224,6 +230,19 @@ bool FindStateRequests(const Image& img, uint32_t& add, uint32_t& drop, std::str
 bool InstallStateRequests(const Image& img, std::string& err);
 void UseStateRequestsForTest(void* add, void* drop);
 bool StateRequestsReady();
+// The game's camera evaluator (a set's camera offset at a pitch): indoors the usual camera's framing replaces the
+// indoor set's, their distances compared with it.
+bool FindCurveEval(const Image& img, uint32_t& eval, std::string& err);
+void UseCurveEval(void* eval);
+// The walking set's framing (field of view, distance multiplier, default/safe/fallback/target positions) and its
+// measured distance: what indoors is framed like, kept for the next start.
+struct UsualFrame {
+    uint32_t set = 0;
+    float values[14] = {};
+    float dist = 0;
+};
+bool GetUsualFrame(UsualFrame& f);  // false until a usual set has been seen (or restored)
+void SetUsualFrame(const UsualFrame& f);
 
 // ---- the tuning panel (panel.cpp) ----
 // A panel on the left of the screen (CameraPlus.js draws it from PanelAction's status). While it is open the
@@ -260,6 +279,7 @@ const size_t kSize = 0x610;
 // Bytes select_set picks the set by: a mode and the camera state (camera_set_state_zone's zones in the levels ask for
 // one: 0x1427c0740 adds a zone's request when the player enters it, 0x1427c07f0 drops it when they leave).
 const size_t kMode = 0x0, kState = 0x1;
+const size_t kPlayerMode = 0x8;          // byte: the player mode select_set matched (SpecialPlayerMode)
 // The state requests: a vector of 16-byte {entity, priority (u32), state (low byte of a u32)} sorted by priority,
 // highest first (a new one goes after equal ones), and its count. select_set takes the first one's state.
 const size_t kRequests = 0x40, kRequestCount = 0x48;
@@ -281,6 +301,8 @@ const size_t pSetId = 0x0, pAspect = 0x4, pFov = 0x8, pDistMul = 0x14, pHide = 0
 const size_t pGroundedSmooth = 0xa0, pAirborneSmooth = 0xb0;                   // vec3 (+pad), seconds
 const size_t pDefault = 0xc0, pSafe = 0xd0, pFallback = 0xe0, pTarget = 0xf0;  // vec3 (+pad)
 const size_t pVertical = 0x100;          // verticalAngleRange (vec2)
+const size_t pXCurve = 0x188, pDistCurve = 0x190;  // cameraOffsetXCurve, cameraOffsetDistanceCurve (resources)
+const size_t kParamsSize = 0x1e0;        // the whole block, curves included
 }  // namespace od
 
 }  // namespace cp

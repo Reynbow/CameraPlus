@@ -488,6 +488,7 @@ static LRESULT CALLBACK PanelWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CLOSE:
         case WM_DESTROY:
             SaveIfDue(~0ull);  // a zoom step not saved yet (the game is quitting)
+            SaveUsualCamera();
             break;
     }
     return CallWindowProcW(g_prevProc, h, msg, wp, lp);

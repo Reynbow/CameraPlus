@@ -52,6 +52,10 @@ static void Setup() {
     Log("Settings: diagnostics=%d, panel key %s, zoom key %s (%s), wheel zoom %s, touchpad zoom %s, combat end delay "
         "%.1f s", g_cfg.diagnostics, Utf8(g_cfg.panelKeyName).c_str(), KeyName(ZoomKey()).c_str(),
         ZoomToggle() ? "toggle" : "hold", WheelZoom() ? "on" : "off", TouchZoom() ? "on" : "off", CombatEndDelay());
+    UsualFrame usual;
+    if (GetUsualFrame(usual))
+        Log("Indoors framed like set %08x (distance x%.3f, %.3f) until a usual set is seen: saved last session", usual.set,
+            usual.values[1], usual.dist);
 
     std::string err;
     if (!InstallCameraHook(img, err)) {
@@ -63,6 +67,16 @@ static void Setup() {
     err.clear();
     if (!InstallStateRequests(img, err))
         Log("Fight camera hold off: %s. The game's fight camera ends with the fight.", err.c_str());
+    // Indoors, "Same as exploration" measures the indoor and usual sets' distances with the game's camera evaluator.
+    // Optional.
+    err.clear();
+    uint32_t eval = 0;
+    if (FindCurveEval(img, eval, err)) {
+        UseCurveEval((void*)(g_gameBase + eval));
+        Log("camera evaluator at +0x%x", eval);
+    } else {
+        Log("Camera evaluator not found (%s): indoors, Same as exploration stays on the game's indoor sets", err.c_str());
+    }
     // Controllers: the game's pause flag (the panel and zoom buttons are the game's in menus) and the hook that keeps
     // controller presses from the game while the panel is open. Both optional.
     CameraTargets targets;

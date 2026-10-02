@@ -63,7 +63,7 @@ struct Slot {
     bool groundValid = false;
     int32_t set = -2;       // diagnostics: the set id last logged
     int32_t move = -1;      // diagnostics: the movement mode last logged
-    uint8_t mode = 0xff, state = 0xff;
+    uint8_t mode = 0xff, state = 0xff, playerMode = 0xff;
     int moves = 0;
     int trace = 0;  // diagnostics: ticks left to log after a set switch
     char requests[512] = {};  // diagnostics: the camera state requests last logged
@@ -211,7 +211,7 @@ static void DumpNow(const Slot& s) {
 }
 
 // ---- diagnostics ----
-static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw) {
+static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw, float dist) {
     for (int i = 0; i < 64; ++i) {
         if (g_seen[i] && g_seenIds[i] == id) return;
         if (!g_seen[i]) {
@@ -228,17 +228,22 @@ static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw) {
         F(to, od::pAirborneSmooth + 8));
     Log("  set %08x: default(%.3f %.3f %.3f) safe(%.3f %.3f %.3f) fallback(%.3f %.3f %.3f) target(%.3f %.3f %.3f)", id,
         raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], raw[13]);
+    if (dist > 0) Log("  set %08x: distance %.3f at a level pitch (x%.3f: %.3f)", id, dist, raw[1], dist * raw[1]);
 }
+
+static float KnownDistance(uint32_t id);  // indoors, below
 
 static void Diagnose(Slot& s) {
     const uint8_t* p = s.od;
     const int32_t set = *(const int32_t*)(p + od::kSetId);
     const int32_t move = *(const int32_t*)(p + od::kMoveMode);
-    if (set != s.set || p[od::kMode] != s.mode || p[od::kState] != s.state || move != s.move) {
-        Log("set %08x -> %08x  mode %u -> %u  state %u -> %u  move %d -> %d  switched %u", (uint32_t)s.set,
-            (uint32_t)set, s.mode, p[od::kMode], s.state, p[od::kState], s.move, move, p[od::kSwitched]);
+    if (set != s.set || p[od::kMode] != s.mode || p[od::kState] != s.state || move != s.move ||
+        p[od::kPlayerMode] != s.playerMode) {
+        Log("set %08x -> %08x  mode %u -> %u  state %u -> %u  player mode 0x%x -> 0x%x  move %d -> %d  switched %u",
+            (uint32_t)s.set, (uint32_t)set, s.mode, p[od::kMode], s.state, p[od::kState], s.playerMode,
+            p[od::kPlayerMode], s.move, move, p[od::kSwitched]);
         s.move = move;
-        if (set != -1 && s.valid) LogSetOnce(p, (uint32_t)set, s.raw);
+        if (set != -1 && s.valid) LogSetOnce(p, (uint32_t)set, s.raw, KnownDistance((uint32_t)set));
         if (set != -1 && s.set >= 0 && set != s.set) {
             // What the new set changes (in our values): every params float that differs from where the blend starts.
             char line[1024];
@@ -250,7 +255,7 @@ static void Diagnose(Slot& s) {
             Log("%s", line);
             s.trace = 20;  // then the blend tick by tick
         }
-        s.set = set, s.mode = p[od::kMode], s.state = p[od::kState];
+        s.set = set, s.mode = p[od::kMode], s.state = p[od::kState], s.playerMode = p[od::kPlayerMode];
     }
     if (s.trace > 0) {
         // The game's target, ours, where the blend started (the tail camera's history takes it) and the blend.
@@ -265,8 +270,9 @@ static void Diagnose(Slot& s) {
     if (now - g_lastSnap >= 5000) {
         g_lastSnap = now;
         const uint8_t* o = p + od::kOut;
-        Log("snap set %08x state %u t=%.2f out: fov %.4f dist x%.3f default(%.3f %.3f %.3f) target(%.3f %.3f %.3f) "
-            "follow %.3f/%.3f s ease dist x%.3f jump %.0f%%", (uint32_t)set, p[od::kState], F(p, od::kT), F(o, od::pFov),
+        Log("snap set %08x state %u player mode 0x%x t=%.2f out: fov %.4f dist x%.3f default(%.3f %.3f %.3f) target(%.3f "
+            "%.3f %.3f) follow %.3f/%.3f s ease dist x%.3f jump %.0f%%", (uint32_t)set, p[od::kState], p[od::kPlayerMode],
+            F(p, od::kT), F(o, od::pFov),
             F(o, od::pDistMul), F(o, od::pDefault), F(o, od::pDefault + 4), F(o, od::pDefault + 8), F(o, od::pTarget),
             F(o, od::pTarget + 4), F(o, od::pTarget + 8), F(o, od::pGroundedSmooth), F(o, od::pAirborneSmooth),
             g_cur.distMul, g_cur.jump * 100);
@@ -280,6 +286,147 @@ static void TakeIdleTimer(Slot& s) {
     if (!CameraOn() || g_testOverride || *(const int32_t*)(s.od + od::kSetId) == -1) return;
     IdleTick(F(s.od, od::kIdleTime));
     SetF(s.od, od::kIdleTime, 0.f);
+}
+
+// ---- indoors by player mode (the game's 1 October update) ----
+// Since the update the game's tighter indoor camera mostly comes from its player-mode tables, not from a camera state
+// zone: in a building the player is in a mode other than exploring or combat (the mode select_set matched,
+// OutputData+8) and select_set takes that mode's sets (seen: 4246688c, 65 degrees, distance x1.00 on a distance curve
+// 1.47 times shorter than the walking set 67944bd5's, the camera 0.25 m to the side, look-at 1.65 m; f97f2c0f while
+// sprinting). CameraPlus counts that as indoors (settings.cpp), like a camera state zone's indoor state (1). Indoors
+// the usual camera's framing goes in place of the indoor set's before any camera's changes: the field of view,
+// positions and distance of the last usual set seen for the same movement (else walking's), the distance scaled by how
+// much shorter the indoor set's own distance is, both measured with the game's camera evaluator (the rig's
+// 0x142074350: distance curve x multiplier, plus the default position, at a pitch). So every camera means the same
+// inside as out: an indoor camera at 40% is 40% of the usual camera, as the panel shows it while editing outdoors (on
+// top of the indoor set it was about a quarter as far), and "Same as exploration" is the exploration camera. The rest
+// (smooth times, pitch limits, collision) stays the indoor set's. The walking set's framing is saved for the next
+// start (settings.cpp): a game loaded inside a building has seen no usual set yet.
+using EvalFn = void* (*)(float* out, const uint8_t* params, float pitch);
+static EvalFn g_eval = nullptr;
+// The rig's call of the evaluator for each history state (the state stride 0x1f0).
+static const char* kEvalCallSig = "48 69 DA F0 01 00 00 48 03 5D 00 48 8B D3 E8 ?? ?? ?? ??";
+
+bool FindCurveEval(const Image& img, uint32_t& eval, std::string& err) {
+    const uint32_t at = FindUnique(img, "camera evaluator call", kEvalCallSig, err);
+    if (!at) return false;
+    const uint32_t call = at + 14;
+    eval = call + 5 + img.I32(call + 1);
+    static const uint8_t kProlog[] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57};  // mov rax,rsp; push rbp/rbx/rsi/rdi
+    if (!img.Contains(eval, sizeof(kProlog)) || memcmp(&img.mem[eval], kProlog, sizeof(kProlog)) != 0) {
+        err = "the camera evaluator doesn't start as expected";
+        return false;
+    }
+    return true;
+}
+
+void UseCurveEval(void* eval) {
+    AcquireSRWLockExclusive(&g_lock);
+    g_eval = (EvalFn)eval;
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+// A set's own camera distance at a level pitch: its distance curve x multiplier, without the default position or the
+// sideways curve (the evaluator skips a curve that isn't there). 0 if it can't be measured.
+static float MeasureDistance(const uint8_t* params) {
+    if (!g_eval) return 0.f;
+    alignas(16) uint8_t copy[od::kParamsSize];
+    memcpy(copy, params, sizeof(copy));
+    SetF(copy, od::pDistMul, 1.f);
+    memset(copy + od::pDefault, 0, 12);
+    memset(copy + od::pXCurve, 0, 8);
+    alignas(16) float out[4] = {};
+    __try {
+        g_eval(out, copy, 0.f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0.f;
+    }
+    const float d = sqrtf(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+    return d > 0.01f && d < 1000.f ? d : 0.f;
+}
+
+struct MeasuredSet {
+    uint32_t id;
+    float dist;
+};
+static MeasuredSet g_dists[64];
+static int g_distCount = 0;
+
+static float KnownDistance(uint32_t id) {
+    for (int i = 0; i < g_distCount && i < 64; ++i)
+        if (g_dists[i].id == id) return g_dists[i].dist;
+    return 0.f;
+}
+
+static float DistanceOf(int32_t set, const uint8_t* params) {  // measured once per set
+    for (int i = 0; i < g_distCount && i < 64; ++i)
+        if (g_dists[i].id == (uint32_t)set) return g_dists[i].dist;
+    const float d = MeasureDistance(params);
+    g_dists[g_distCount++ % 64] = {(uint32_t)set, d};
+    return d;
+}
+
+struct UsualCamera {
+    bool valid = false;
+    int32_t set = -1;
+    float raw[kN] = {};
+    float dist = 0;
+};
+static UsualCamera g_usual[16];  // by movement mode
+static int32_t g_framedSet = -1, g_framedFrom = -1;  // diagnostics: the indoor set and the usual set last logged
+
+static void UsualFraming(Slot& s, int32_t set, float* eff) {
+    const uint8_t* p = s.od;
+    const int32_t move = *(const int32_t*)(p + od::kMoveMode);
+    const int m = move >= 0 && move < 16 ? move : 0;
+    const bool special = SpecialPlayerMode(p[od::kPlayerMode]);
+    const float dist = g_eval ? DistanceOf(set, p + od::kTo) : 0.f;
+    if (p[od::kMode] == 0 && p[od::kState] == 0 && !special) {  // a usual set: its framing for this movement
+        UsualCamera& u = g_usual[m];
+        u.valid = dist > 0;
+        u.set = set;
+        memcpy(u.raw, s.raw, sizeof(u.raw));
+        u.dist = dist;
+        g_framedSet = -1;
+        return;
+    }
+    const UsualCamera* u = g_usual[m].valid ? &g_usual[m] : g_usual[0].valid ? &g_usual[0] : nullptr;
+    const bool indoors = special || p[od::kState] == kStateIndoor;
+    if (!indoors || !CameraOn() || g_testOverride || !u || !(dist > 0)) {
+        g_framedSet = -1;
+        return;
+    }
+    for (int i = 0; i < kFramed; ++i) eff[i] = u->raw[i];
+    eff[1] = u->raw[1] * u->dist / dist;
+    if (g_cfg.diagnostics && (set != g_framedSet || u->set != g_framedFrom))
+        Log("indoors (state %u, player mode 0x%x): set %08x framed like %08x (distance %.3f x%.3f against %.3f x%.3f: "
+            "x%.3f)", p[od::kState], p[od::kPlayerMode], (uint32_t)set, (uint32_t)u->set, dist, s.raw[1], u->dist,
+            u->raw[1], eff[1]);
+    g_framedSet = set;
+    g_framedFrom = u->set;
+}
+
+bool GetUsualFrame(UsualFrame& f) {
+    AcquireSRWLockShared(&g_lock);
+    const UsualCamera& u = g_usual[0];
+    const bool ok = u.valid;
+    if (ok) {
+        f.set = (uint32_t)u.set;
+        memcpy(f.values, u.raw, sizeof(f.values));
+        f.dist = u.dist;
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return ok;
+}
+
+void SetUsualFrame(const UsualFrame& f) {
+    AcquireSRWLockExclusive(&g_lock);
+    UsualCamera& u = g_usual[0];
+    u.valid = f.dist > 0;
+    u.set = (int32_t)f.set;
+    memcpy(u.raw, f.values, sizeof(f.values));
+    u.dist = f.dist;
+    ReleaseSRWLockExclusive(&g_lock);
 }
 
 // Our values into the blend's target (see the top of the file).
@@ -301,14 +448,17 @@ static void ApplyTarget(Slot& s) {
     // (the walking set's camera +0.25 m, look-at 1.4 m; the jump set's -1.30 m, 1.0 m), which puts the player high on
     // the screen, the more so the closer the camera. Its field of view, distance and positions are taken only part of
     // the way from the camera on the ground (the last set before the jump); the rest (auto-pitch, smooth times...)
-    // stays the jump set's.
+    // stays the jump set's. Indoors "the game's" framing is the usual camera's (UsualFraming).
+    float eff[kN];
+    memcpy(eff, s.raw, sizeof(eff));
+    UsualFraming(s, set, eff);
     float base[kN];
-    memcpy(base, s.raw, sizeof(base));
+    memcpy(base, eff, sizeof(base));
     if (*(const int32_t*)(p + od::kMoveMode) != od::kMoveJump) {
-        memcpy(s.ground, s.raw, sizeof(s.ground));
+        memcpy(s.ground, eff, sizeof(s.ground));
         s.groundValid = true;
     } else if (s.groundValid && g_cur.jump != 1.f) {
-        for (int i = 0; i < kFramed; ++i) base[i] = s.ground[i] + (s.raw[i] - s.ground[i]) * g_cur.jump;
+        for (int i = 0; i < kFramed; ++i) base[i] = s.ground[i] + (eff[i] - s.ground[i]) * g_cur.jump;
     }
     Apply(base, s.mod);
     for (int i = 0; i < kN; ++i) SetF(to, kFields[i], s.mod[i]);
@@ -472,7 +622,7 @@ static void HookBlend(void* entity, void* time, void* state) {
         s = Enter(entity);
         if (s) {
             TakeIdleTimer(*s);
-            ReportCameraState(s->od[od::kState]);  // the indoor camera
+            ReportCameraState(s->od[od::kState], s->od[od::kPlayerMode]);  // the indoor camera
             Ease(time ? *(const float*)time : 0.f);  // FixedTime starts with the tick's time step
             ApplyTarget(*s);
             KeepFightState(*s);
