@@ -9,7 +9,7 @@ std::wstring g_modDir;
 uintptr_t g_gameBase = 0;
 bool g_knownBuild = false;
 
-static const char* kKnownBuildId = "6aba5bb8-063da000-05fbdb88";  // build 25600401
+static const char* kKnownBuildId = "6abef018-063e2000-05fc45fb";  // build 25673981
 
 static void Setup() {
     LoadConfig();
@@ -42,7 +42,7 @@ static void Setup() {
         return;
     }
     g_knownBuild = build == kKnownBuildId;
-    Log("Game build %s (%s)", build.c_str(), g_knownBuild ? "known build 25600401" : "other build; running on signatures");
+    Log("Game build %s (%s)", build.c_str(), g_knownBuild ? "known build 25673981" : "other build; running on signatures");
     for (int v = 0; v < kViewCount; ++v) {
         const Tuning t = GetView(v);
         const int st = ViewStyle(v);

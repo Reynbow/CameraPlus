@@ -17,7 +17,7 @@ struct Image;
 extern HMODULE g_self;
 extern std::wstring g_modDir;   // folder holding cameraplus.dll, trailing backslash
 extern uintptr_t g_gameBase;    // live base of CONTROLResonant.exe
-extern bool g_knownBuild;       // the build the offsets were checked on (25600401)
+extern bool g_knownBuild;       // the build the offsets were checked on (25673981)
 
 // ---- logging (util.cpp) ----
 void LogInit();
@@ -37,7 +37,7 @@ std::string JsonEscape(const std::string& s);
 struct Tuning {
     float fovAdd = 0;        // degrees added to the field of view
     float distMul = 1;       // multiplies the set's distance curve (cameraOffsetDistanceCurveMultiplier)
-    float posAdd[3] = {};    // added to the default, safe and fallback camera positions
+    float posAdd[3] = {};    // added to the default camera position (the safe and fallback ones start the wall check)
     float targetAdd[3] = {}; // added to the target offset
     float jump = 1;          // how much of the game's jump camera to keep (1 = all, 0 = the camera from the ground)
     bool Identity() const;

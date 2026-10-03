@@ -174,8 +174,13 @@ static void Apply(const float* raw, float* mod) {
     const float fovScale = raw[0] < 3.5f ? 3.14159265f / 180.f : 1.f;
     mod[0] = raw[0] + t.fovAdd * fovScale;
     mod[1] = raw[1] * t.distMul;
-    for (int v = 0; v < 3; ++v)  // default, safe, fallback
-        for (int a = 0; a < 3; ++a) mod[2 + v * 3 + a] = raw[2 + v * 3 + a] + t.posAdd[a];
+    // The camera position moves; the safe and fallback positions stay the game's. They're where the game's wall check
+    // starts (update_camera_view turns both with the camera's yaw, puts them on the player at head height, sweeps
+    // between them, then from there out to the camera, and stops the camera at the first wall). Moved with a side
+    // offset they started inside a wall the player stood against, the sweep missed it and the camera went through. The
+    // game's own over-the-shoulder sets do the same: the side offset in the default position, the others centred.
+    for (int a = 0; a < 3; ++a) mod[2 + a] = raw[2 + a] + t.posAdd[a];
+    for (int i = 5; i < 11; ++i) mod[i] = raw[i];
     for (int a = 0; a < 3; ++a) mod[11 + a] = raw[11 + a] + t.targetAdd[a];
     // The pivot follows the player by these smooth times (seconds; sideways and toward/away from the camera), so a
     // quick move puts it a fixed lag behind, in metres. In a closer camera that lag is a bigger part of the screen: a
