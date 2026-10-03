@@ -47,12 +47,16 @@ struct Config {
     bool diagnostics = false;  // extra log lines (set switches, periodic snapshots)
     int panelKey = VK_F1;      // opens and closes the tuning panel (0 = none)
     std::wstring panelKeyName = L"F1";
-    int panelKeyIndex = 2;     // its place in KeyList() (the MODS slider), -1 if the INI named another key
 };
 extern Config g_cfg;
 void LoadConfig();  // also loads the cameras (LoadViews)
-// The panel key as the MODS page's slider picks it (a place in KeyList()); false if out of range.
-bool SetPanelKeyIndex(int index);
+// The MODS page's key options (Mod Settings Menu 1.7.1): a key as its virtual-key code (3-254), a controller button as
+// 256 + its place in our pad list minus one (A = 256 ... D-pad Right = 271); 0 is none.
+bool ValidKeyCode(int vk);
+bool ValidPadCode(int code);
+int PadCodeOf(int index);  // a place in the pad list -> its code (0 for none)
+int PadIndexOf(int code);  // and back
+bool SetPanelKey(int vk);  // false if it isn't a key code
 
 // ---- the keys the MODS slider offers (keys.cpp) ----
 struct KeyChoice {
@@ -62,7 +66,6 @@ struct KeyChoice {
 const int kDefaultPanelKey = 2;  // F1
 void BuildKeyList();
 const std::vector<KeyChoice>& KeyList();
-int KeyListIndex(int vk);  // -1 if not in the list
 
 // ---- controllers (pad.cpp) ----
 // Buttons by place in the list (0 = none; the MODS slider and the INI save places): A, B, X, Y, LB, RB, LT, RT,

@@ -14,12 +14,12 @@ Download and install instructions are on Nexus Mods (search for CameraPlus in th
 - Mouse wheel and touchpad zoom: scroll the wheel, or swipe up or down on a DualSense or DualShock 4 touchpad, to bring the camera you're in closer or move it further away (its Distance: 10% a wheel notch, 80% for a swipe the whole height of the touchpad; kept for next time). While wheel zoom is on, the game doesn't get the wheel during play (by default the wheel switches the controller ability layer); menus and the map still scroll with it. Both can be turned off in the panel.
 - The game's own camera does the rest: collision, the pivot, jumps, dashes, gravity and lock-on all work on the new values, and every blend between the game's camera sets stays smooth.
 - Keyboard and controller support; while the panel is open the game doesn't see those presses, but the mouse and sticks still move the camera so you can look at a change as you make it.
-- The panel key and button can be changed on the MODS page (Mod Settings Menu).
+- The panel key and button can be changed on the MODS page (Mod Settings Menu 1.7.1 or later): select the row and press the key or button.
 
 ## Requirements (to play)
 
 - [f2g DLL Mod Loader (crloader)](https://www.nexusmods.com/controlresonant/mods/9)
-- [Mod Settings Menu](https://www.nexusmods.com/controlresonant/mods/35) (for the MODS page options)
+- [Mod Settings Menu](https://www.nexusmods.com/controlresonant/mods/35) 1.7.1 or later (for the MODS page options)
 
 ## Building
 

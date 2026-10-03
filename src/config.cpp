@@ -66,43 +66,70 @@ bool Tuning::Identity() const {
            targetAdd[1] == 0 && targetAdd[2] == 0 && jump == 1;
 }
 
-// A slider position as Mod Settings Menu saved it in ModMenuConfig\cameraplus.ini, -1 if not saved.
+// ---- the MODS page (Mod Settings Menu 1.7.1's key options) ----
+// The player picks the panel key and button by pressing them; Mod Settings Menu shows the key's name or the button's
+// icon and saves a code in ModMenuConfig\cameraplus.ini: a key's virtual-key code (3-254, mouse buttons included), a
+// controller button as 256 + its place in A B X Y LB RB LT RT View Menu LS RS D-pad Up Down Left Right (our pad list
+// without its "none"), 0 for none. Before 1.4.5 the options were sliders saving a place in KeyList() and in the pad
+// list (panel_key, panel_button); a choice saved that way is moved over once, under the new names.
+static std::wstring MenuIniPath() { return g_modDir + L"ModMenuConfig\\cameraplus.ini"; }
+
+// A value as Mod Settings Menu saved it, -1 if not saved.
 static int ReadMenuValue(const wchar_t* key) {
     wchar_t buf[64];
-    GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, (g_modDir + L"ModMenuConfig\\cameraplus.ini").c_str());
+    GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, MenuIniPath().c_str());
     if (!buf[0]) return -1;
     wchar_t* end = nullptr;
     const double v = wcstod(buf, &end);
     return end == buf || v < 0 || v > 100000 ? -1 : (int)(v + 0.5);
 }
 
-static void UseKey(Config& c, int index) {
-    const KeyChoice& k = KeyList()[index];
-    c.panelKey = k.vk;
-    c.panelKeyName = k.vk ? Wide(k.name) : L"None";
-    c.panelKeyIndex = index;
+static void WriteMenuValue(const wchar_t* key, int v) {
+    wchar_t b[16];
+    swprintf_s(b, L"%d", v);
+    WritePrivateProfileStringW(L"Settings", key, b, MenuIniPath().c_str());
 }
 
-// The panel key and button: the MODS page's sliders first, then CameraPlus.ini (PanelKey= a key name,
-// PanelButton= a place in the controller list), then F1 and D-pad Left.
+bool ValidKeyCode(int vk) { return vk == 0 || (vk >= 3 && vk <= 254); }
+bool ValidPadCode(int code) { return code == 0 || (code >= 256 && code < 256 + PadButtonCount() - 1); }
+int PadCodeOf(int index) { return index > 0 && index < PadButtonCount() ? 256 + index - 1 : 0; }
+int PadIndexOf(int code) { return code >= 256 && code < 256 + PadButtonCount() - 1 ? code - 256 + 1 : 0; }
+
+static void UseKey(Config& c, int vk) {
+    c.panelKey = vk;
+    c.panelKeyName = vk ? Wide(KeyName(vk)) : L"None";
+}
+
+// The panel key and button: the MODS page's key options first (or their old sliders, moved over), then
+// CameraPlus.ini (PanelKey= a key name, PanelButton= a place in the controller list), then F1 and D-pad Left.
 void LoadConfig() {
     BuildKeyList();
     Config c;
     c.enabled = ReadBool(L"Enabled", true);
     c.diagnostics = ReadBool(L"Diagnostics", false);
-    const int menuKey = ReadMenuValue(L"panel_key");
-    if (menuKey >= 0 && menuKey < (int)KeyList().size()) {
-        UseKey(c, menuKey);
+    int vk = ReadMenuValue(L"panel_hotkey");
+    if (vk < 0) {
+        const int old = ReadMenuValue(L"panel_key");
+        if (old >= 0 && old < (int)KeyList().size()) WriteMenuValue(L"panel_hotkey", vk = KeyList()[old].vk);
+    }
+    if (vk >= 0 && ValidKeyCode(vk)) {
+        UseKey(c, vk);
     } else {
         std::wstring k = ReadString(L"CameraPlus", L"PanelKey");
         if (!k.empty()) {
             c.panelKey = ParseKeyName(k);
             c.panelKeyName = c.panelKey ? k : L"None";
-            c.panelKeyIndex = KeyListIndex(c.panelKey);
         }
     }
-    int button = ReadMenuValue(L"panel_button");
-    if (button < 0 || button >= PadButtonCount()) {
+    int code = ReadMenuValue(L"panel_pad");
+    if (code < 0) {
+        const int old = ReadMenuValue(L"panel_button");
+        if (old >= 0 && old < PadButtonCount()) WriteMenuValue(L"panel_pad", code = PadCodeOf(old));
+    }
+    int button;
+    if (code >= 0 && ValidPadCode(code)) {
+        button = PadIndexOf(code);
+    } else {
         std::wstring b = ReadString(L"CameraPlus", L"PanelButton");
         button = b.empty() ? kDefaultPanelButton : _wtoi(b.c_str());
         if (button < 0 || button >= PadButtonCount()) button = kDefaultPanelButton;
@@ -112,10 +139,10 @@ void LoadConfig() {
     LoadViews();
 }
 
-bool SetPanelKeyIndex(int index) {
-    if (index < 0 || index >= (int)KeyList().size()) return false;
-    if (index == g_cfg.panelKeyIndex) return true;
-    UseKey(g_cfg, index);
+bool SetPanelKey(int vk) {
+    if (!ValidKeyCode(vk)) return false;
+    if (vk == g_cfg.panelKey) return true;
+    UseKey(g_cfg, vk);
     Log("Panel key: %s", Utf8(g_cfg.panelKeyName).c_str());
     return true;
 }

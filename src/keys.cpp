@@ -1,5 +1,6 @@
-// The keys the MODS page's "Panel key" slider offers, with their names on the player's keyboard (the same list as
-// FastTravelPlus's hotkey slider). The slider saves a position in this list, so it only ever grows at the end.
+// The keys the MODS page's old "Panel key" slider offered (before 1.4.5), with their names on the player's keyboard
+// (the same list as FastTravelPlus's hotkey slider). The slider saved a position in this list; LoadConfig moves such a
+// choice over to the key option once.
 #include "common.h"
 
 namespace cp {
@@ -68,11 +69,5 @@ void BuildKeyList() {
 }
 
 const std::vector<KeyChoice>& KeyList() { return g_keys; }
-
-int KeyListIndex(int vk) {
-    for (size_t i = 0; i < g_keys.size(); ++i)
-        if (g_keys[i].vk == vk) return (int)i;
-    return -1;
-}
 
 }  // namespace cp

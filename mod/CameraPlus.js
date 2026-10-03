@@ -1,8 +1,7 @@
 // CameraPlus: the tuning panel. cameraplus.dll owns the panel (rows, values, keys, the controller); this script
 // draws it on the left of the screen, with the list of keys on the right, from the DLL's status, and redraws when the
 // status's serial changes. It also
-// passes the HUD's combat flag to the DLL, and on the MODS page shows the panel key's and button's names next to
-// their sliders and tells the DLL when they move.
+// passes the HUD's combat flag to the DLL, and tells it when the panel key or button changes on the MODS page.
 (function () {
     'use strict';
     if (window.__CameraPlusInstalled) return;
@@ -12,9 +11,7 @@
     var DIAG = !!C.diagnostics;
     var URL = 'coui://base/__cameraplus__.json';
     var LOG_URL = 'coui://base/__cameraplus_log__.json';
-    var MOD_ID = 'cameraplus', KEY_OPTION = 'panel_key', BUTTON_OPTION = 'panel_button';
-    var KEYS = C.keys || [];  // the Panel key slider's key names, by position (0 = Off)
-    var PAD = C.pad || [];    // the Panel button slider's button names, by position (0 = Off)
+    var MOD_ID = 'cameraplus', KEY_OPTION = 'panel_hotkey', PAD_OPTION = 'panel_pad';
     var OPEN_MS = 50, CLOSED_MS = 150;  // how often the status is read, with the panel open / closed
     var YELLOW = '#fbe732';             // the game's objective yellow (RadarPlus uses it too)
     var V = function (px) { return (px / 10.8).toFixed(5) + 'vh'; };  // 1080p pixels to vh
@@ -64,8 +61,6 @@
     }
     function remove(n) { if (n && n.parentNode) n.parentNode.removeChild(n); }
     function connected(n) { for (var i = 0; n && i < 64; i++, n = n.parentNode) if (n === document.body) return true; return false; }
-    function model(k, d) { var m = window[k]; return m && m.value !== undefined ? m.value : d; }
-    function hex(s) { var o = ''; for (var i = 0; i < s.length; i++) o += ('0' + s.charCodeAt(i).toString(16)).slice(-2); return o; }
 
     // ---------------------------------------------------------------- the panel
     var panel = null, keys = null, lastSerial = -1;
@@ -186,72 +181,26 @@
     }
 
     // ---------------------------------------------------------------- the MODS page
-    // The sliders' positions live in Mod Settings Menu (window.CMM); without it, the DLL's.
-    var sent = { key: typeof C.panelKey === 'number' ? C.panelKey : 2, button: typeof C.panelButton === 'number' ? C.panelButton : 15 };
-    function menuPosition(key, count, fallback) {
+    // The panel key and button are Mod Settings Menu key options (1.7.1): it shows the key's name or the button's icon
+    // and keeps their codes (window.CMM.value). A change made there reaches the DLL with the next status reads, until
+    // the DLL reports it. Only changes: the first codes the menu gives can come from before the DLL moved an old slider
+    // choice over, and the DLL has the saved ones already.
+    var seen = null, want = {};
+    function menuCode(key) {
         var v;
         try { if (window.CMM && typeof window.CMM.value === 'function') v = window.CMM.value(MOD_ID, key); } catch (e) { v = undefined; }
-        if (typeof v === 'number' && isFinite(v) && Math.round(v) >= 0 && Math.round(v) < count) return Math.round(v);
-        return fallback;
+        return typeof v === 'number' && isFinite(v) ? Math.round(v) : null;
     }
-    function keyIndex() { return menuPosition(KEY_OPTION, KEYS.length, sent.key); }
-    function buttonIndex() { return menuPosition(BUTTON_OPTION, PAD.length, sent.button); }
-
-    // Mod Settings Menu shows a slider's position as a number; next to ours we show the key or button's name
-    // instead, in a copy of the number's element that follows its classes (focus and section colours). Mod Settings
-    // Menu names an option cmm_<hex of the mod id>_<hex of the option id>.
-    function binding(option) { return 'cmm_' + hex(MOD_ID) + '_' + hex(option); }
-    var sliders = [
-        { binding: binding(KEY_OPTION), name: function () { var i = keyIndex(); return i > 0 && KEYS[i] ? KEYS[i] : 'Off'; } },
-        { binding: binding(BUTTON_OPTION), name: function () { var i = buttonIndex(); return i > 0 && PAD[i] ? PAD[i] : 'Off'; } }
-    ];
-    sliders.forEach(function (s) { s.src = null; s.el = null; });
-    var sliderSearch = 0;
-    function sliderFor(node) {
-        var at = node.attributes;
-        for (var j = 0; at && j < at.length; j++) {
-            var v = at[j] && at[j].value;
-            if (typeof v !== 'string' || v.indexOf('cmm_') === -1) continue;
-            for (var k = 0; k < sliders.length; k++) if (v.indexOf(sliders[k].binding + '_') !== -1) return sliders[k];
-        }
-        return null;
-    }
-    function tickSliders() {
-        var open = model('ui_stacks_menu_options_active', false) && model('ui_stacks_menu_options_states_mods_active', false);
-        if (!open) return;
-        var t = Date.now(), missing = false;
-        sliders.forEach(function (s) {
-            if (s.src && !connected(s.src)) s.src = s.el = null;
-            missing = missing || !s.src;
-        });
-        if (missing && t - sliderSearch >= 300) {
-            sliderSearch = t;
-            var values = document.querySelectorAll('.options-slider__value');
-            for (var i = 0; i < values.length; i++) {
-                var s = sliderFor(values[i]);
-                if (!s || s.src || !values[i].parentNode) continue;
-                // A page copy taken while ours showed has an old name in it: out, and the number back.
-                var old = values[i].parentNode.querySelectorAll('.cp-key');
-                for (var j = 0; j < old.length; j++) remove(old[j]);
-                s.src = values[i];
-                s.el = el('div');
-                values[i].parentNode.insertBefore(s.el, values[i].nextSibling);
-            }
-        }
-        sliders.forEach(function (s) {
-            if (!s.src) return;
-            var cls = s.src.className + ' cp-key';
-            if (s.el.className !== cls) s.el.className = cls;
-            var name = s.name();
-            if (s.el.textContent !== name) s.el.textContent = name;
-            if (s.src.style.display !== 'none') s.src.style.display = 'none';
-        });
-    }
-    // The sliders' positions when they differ from what the DLL has.
     function menuParams() {
-        var k = keyIndex(), b = buttonIndex(), q = '';
-        if (k !== sent.key) q += '&k=' + k;
-        if (b !== sent.button) q += '&b=' + b;
+        var k = menuCode(KEY_OPTION), p = menuCode(PAD_OPTION), q = '';
+        if (!seen) {
+            if (k === null && p === null) return '';
+            seen = { key: k, pad: p };
+        }
+        if (k !== null && k !== seen.key) want.key = seen.key = k;
+        if (p !== null && p !== seen.pad) want.pad = seen.pad = p;
+        if (want.key !== undefined) q += '&pk=' + want.key;
+        if (want.pad !== undefined) q += '&pp=' + want.pad;
         return q;
     }
 
@@ -273,7 +222,6 @@
             setTimeout(poll, open ? OPEN_MS : CLOSED_MS);
         }
         try {
-            tickSliders();
             var x = new XMLHttpRequest();
             x.open('GET', URL + '?a=status' + combatParam() + menuParams() + '&n=' + Date.now(), true);
             x.onreadystatechange = function () {
@@ -281,8 +229,8 @@
                 var s = null;
                 try {
                     s = JSON.parse(x.responseText);
-                    if (typeof s.panelKey === 'number') sent.key = s.panelKey;
-                    if (typeof s.panelButton === 'number') sent.button = s.panelButton;
+                    if (s.panelKey === want.key) delete want.key;
+                    if (s.panelPad === want.pad) delete want.pad;
                     render(s);
                 } catch (e) { log('render: ' + e); }
                 next(!!(s && s.open));

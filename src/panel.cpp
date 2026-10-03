@@ -536,22 +536,22 @@ void StartPanel() {
 }
 
 // ---- the endpoint ----
-// Every status read may carry the HUD's combat flag (c) and the MODS page's sliders (k: the panel key's place in
-// KeyList(), b: the panel button's place in the controller list).
+// Every status read may carry the HUD's combat flag (c) and a change on the MODS page's key options (pk: the panel
+// key's code, pp: the panel button's code).
 std::string PanelAction(const std::string& action, const char* query) {
     std::string c, k, b;
     if (QueryParam(query, "c", c)) ReportCombat(c == "1");
-    if (QueryParam(query, "k", k) && !k.empty()) SetPanelKeyIndex(atoi(k.c_str()));
-    if (QueryParam(query, "b", b) && !b.empty()) {
-        const int i = atoi(b.c_str());
-        if (i >= 0 && i < PadButtonCount()) SetPanelButton(i);
+    if (QueryParam(query, "pk", k) && !k.empty()) SetPanelKey(atoi(k.c_str()));
+    if (QueryParam(query, "pp", b) && !b.empty()) {
+        const int code = atoi(b.c_str());
+        if (ValidPadCode(code)) SetPanelButton(PadIndexOf(code));
     }
     Locked l;
     std::string s = "{\"ok\":true,\"version\":\"" CP_VERSION "\",\"serial\":";
     s += std::to_string(g_serial);
     s += ",\"open\":";
     s += g_open ? "true" : "false";
-    s += ",\"panelKey\":" + std::to_string(g_cfg.panelKeyIndex) + ",\"panelButton\":" + std::to_string(PanelButton());
+    s += ",\"panelKey\":" + std::to_string(g_cfg.panelKey) + ",\"panelPad\":" + std::to_string(PadCodeOf(PanelButton()));
     if (action != "status" || !g_open) return s + "}";
     s += ",\"sel\":" + std::to_string(g_sel) + ",\"key\":\"" + JsonEscape(Utf8(g_cfg.panelKeyName)) + "\"";
     s += ",\"button\":\"" + JsonEscape(PadButtonName(PanelButton())) + "\",\"pad\":" + (g_lastPad ? "true" : "false");
@@ -573,18 +573,13 @@ std::string PanelAction(const std::string& action, const char* query) {
     return s;
 }
 
-// The script's first values: its version, and the MODS sliders' names (keys and buttons by place) and positions.
+// The script's first values: its version, and the panel key's and button's codes.
 std::string BuildConfigJs() {
     std::string js = "window.__CameraPlusConfig={version:\"" CP_VERSION "\",diagnostics:";
     js += g_cfg.diagnostics ? "1" : "0";
     js += ",hook:";
     js += CameraHookInstalled() ? "1" : "0";
-    js += ",panelKey:" + std::to_string(g_cfg.panelKeyIndex) + ",panelButton:" + std::to_string(PanelButton());
-    js += ",keys:[";
-    for (size_t i = 0; i < KeyList().size(); ++i) js += (i ? ",\"" : "\"") + JsonEscape(KeyList()[i].name) + "\"";
-    js += "],pad:[";
-    for (int i = 0; i < PadButtonCount(); ++i) js += (i ? ",\"" : "\"") + JsonEscape(PadButtonName(i)) + "\"";
-    js += "]};";
+    js += ",panelKey:" + std::to_string(g_cfg.panelKey) + ",panelPad:" + std::to_string(PadCodeOf(PanelButton())) + "};";
     return js;
 }
 
