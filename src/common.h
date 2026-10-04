@@ -234,15 +234,16 @@ bool InstallStateRequests(const Image& img, std::string& err);
 void UseStateRequestsForTest(void* add, void* drop);
 bool StateRequestsReady();
 // The game's camera evaluator (a set's camera offset at a pitch): indoors the usual camera's framing replaces the
-// indoor set's, their distances compared with it.
+// indoor set's, their distances and sideways curves compared with it.
 bool FindCurveEval(const Image& img, uint32_t& eval, std::string& err);
 void UseCurveEval(void* eval);
-// The walking set's framing (field of view, distance multiplier, default/safe/fallback/target positions) and its
-// measured distance: what indoors is framed like, kept for the next start.
+// The walking set's framing (field of view, distance multiplier, default/safe/fallback/target positions), its measured
+// distance and its sideways curve at a level pitch: what indoors is framed like, kept for the next start.
 struct UsualFrame {
     uint32_t set = 0;
     float values[14] = {};
     float dist = 0;
+    float side = 0;
 };
 bool GetUsualFrame(UsualFrame& f);  // false until a usual set has been seen (or restored)
 void SetUsualFrame(const UsualFrame& f);

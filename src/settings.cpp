@@ -418,6 +418,8 @@ void SaveUsualCamera() {
         }
         swprintf_s(b, L"%.6f", f.dist);
         WritePrivateProfileStringW(L"UsualCamera", L"Length", b, ini.c_str());
+        swprintf_s(b, L"%.6f", f.side);
+        WritePrivateProfileStringW(L"UsualCamera", L"Side", b, ini.c_str());
         g_savedUsual = f;
     }
     ReleaseSRWLockExclusive(&g_usualSave);
@@ -440,6 +442,7 @@ static void LoadUsualCamera() {
     bool ok = read(L"Length", f.dist) && f.dist > 0;
     for (int i = 0; i < 14 && ok; ++i) ok = read(kUsualKeys[i], f.values[i]);
     if (!ok || !(f.values[0] > 0) || !(f.values[1] > 0)) return;
+    if (!read(L"Side", f.side) || !(fabsf(f.side) < 100.f)) f.side = 0;  // saved before 1.4.6: until the set is seen
     SetUsualFrame(f);
     g_savedUsual = f;
 }

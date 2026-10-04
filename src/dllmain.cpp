@@ -54,8 +54,8 @@ static void Setup() {
         ZoomToggle() ? "toggle" : "hold", WheelZoom() ? "on" : "off", TouchZoom() ? "on" : "off", CombatEndDelay());
     UsualFrame usual;
     if (GetUsualFrame(usual))
-        Log("Indoors framed like set %08x (distance x%.3f, %.3f) until a usual set is seen: saved last session", usual.set,
-            usual.values[1], usual.dist);
+        Log("Indoors framed like set %08x (distance x%.3f, %.3f, side %+.3f) until a usual set is seen: saved last session",
+            usual.set, usual.values[1], usual.dist, usual.side);
 
     std::string err;
     if (!InstallCameraHook(img, err)) {

@@ -216,7 +216,15 @@ static void DumpNow(const Slot& s) {
 }
 
 // ---- diagnostics ----
-static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw, float dist) {
+// A set's own camera at a level pitch, from the game's evaluator (indoors, below): its distance (distance curve x
+// multiplier, toward the camera) and its sideways offset (sideways curve). dist 0 if it can't be measured.
+struct Measure {
+    float dist = 0, side = 0;
+};
+static Measure KnownMeasure(uint32_t id);
+static bool Evaluate(const uint8_t* params, float pitch, float* out);
+
+static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw, const Measure& m) {
     for (int i = 0; i < 64; ++i) {
         if (g_seen[i] && g_seenIds[i] == id) return;
         if (!g_seen[i]) {
@@ -233,10 +241,20 @@ static void LogSetOnce(const uint8_t* p, uint32_t id, const float* raw, float di
         F(to, od::pAirborneSmooth + 8));
     Log("  set %08x: default(%.3f %.3f %.3f) safe(%.3f %.3f %.3f) fallback(%.3f %.3f %.3f) target(%.3f %.3f %.3f)", id,
         raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], raw[13]);
-    if (dist > 0) Log("  set %08x: distance %.3f at a level pitch (x%.3f: %.3f)", id, dist, raw[1], dist * raw[1]);
+    if (m.dist > 0) {
+        // The sideways curve over the set's pitch range (the evaluator maps the pitch into it): flat or not.
+        const float lo = F(to, od::pVertical), hi = F(to, od::pVertical + 4);
+        const float pitches[5] = {lo, lo / 2, 0.f, hi / 2, hi};
+        float side[5] = {};
+        for (int i = 0; i < 5; ++i) {
+            alignas(16) float out[4] = {};
+            side[i] = Evaluate(to, pitches[i], out) ? out[0] : 0.f;
+        }
+        Log("  set %08x: distance %.3f, side %+.3f at a level pitch (x%.3f: %.3f); side %+.3f %+.3f %+.3f %+.3f %+.3f "
+            "over pitch %.2f..%.2f", id, m.dist, m.side, raw[1], m.dist * raw[1], side[0], side[1], side[2], side[3],
+            side[4], lo, hi);
+    }
 }
-
-static float KnownDistance(uint32_t id);  // indoors, below
 
 static void Diagnose(Slot& s) {
     const uint8_t* p = s.od;
@@ -248,7 +266,7 @@ static void Diagnose(Slot& s) {
             (uint32_t)s.set, (uint32_t)set, s.mode, p[od::kMode], s.state, p[od::kState], s.playerMode,
             p[od::kPlayerMode], s.move, move, p[od::kSwitched]);
         s.move = move;
-        if (set != -1 && s.valid) LogSetOnce(p, (uint32_t)set, s.raw, KnownDistance((uint32_t)set));
+        if (set != -1 && s.valid) LogSetOnce(p, (uint32_t)set, s.raw, KnownMeasure((uint32_t)set));
         if (set != -1 && s.set >= 0 && set != s.set) {
             // What the new set changes (in our values): every params float that differs from where the blend starts.
             char line[1024];
@@ -302,11 +320,15 @@ static void TakeIdleTimer(Slot& s) {
 // the usual camera's framing goes in place of the indoor set's before any camera's changes: the field of view,
 // positions and distance of the last usual set seen for the same movement (else walking's), the distance scaled by how
 // much shorter the indoor set's own distance is, both measured with the game's camera evaluator (the rig's
-// 0x142074350: distance curve x multiplier, plus the default position, at a pitch). So every camera means the same
-// inside as out: an indoor camera at 40% is 40% of the usual camera, as the panel shows it while editing outdoors (on
-// top of the indoor set it was about a quarter as far), and "Same as exploration" is the exploration camera. The rest
-// (smooth times, pitch limits, collision) stays the indoor set's. The walking set's framing is saved for the next
-// start (settings.cpp): a game loaded inside a building has seen no usual set yet.
+// 0x142074350: (sideways curve, distance curve x multiplier) at a pitch, plus the default position). The sideways
+// offset too: the walking set's is in its sideways curve (its default position is centred), the indoor sets' in their
+// default position (0.25 m), and the curves stay the indoor set's, so the default position makes up the difference.
+// Without it the camera was centred indoors, and a side offset that centred the player outdoors pushed them off
+// centre the other way. So every camera means the same inside as out: an indoor camera at 40% is 40% of the usual
+// camera, as the panel shows it while editing outdoors (on top of the indoor set it was about a quarter as far), and
+// "Same as exploration" is the exploration camera. Distance and side are matched at a level pitch. The rest (smooth
+// times, pitch limits, collision) stays the indoor set's. The walking set's framing is saved for the next start
+// (settings.cpp): a game loaded inside a building has seen no usual set yet.
 using EvalFn = void* (*)(float* out, const uint8_t* params, float pitch);
 static EvalFn g_eval = nullptr;
 // The rig's call of the evaluator for each history state (the state stride 0x1f0).
@@ -331,51 +353,60 @@ void UseCurveEval(void* eval) {
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-// A set's own camera distance at a level pitch: its distance curve x multiplier, without the default position or the
-// sideways curve (the evaluator skips a curve that isn't there). 0 if it can't be measured.
-static float MeasureDistance(const uint8_t* params) {
-    if (!g_eval) return 0.f;
+// The evaluator's camera offset for a set at a pitch: its curves (the evaluator skips a curve that isn't there), the
+// multiplier 1, without the default position. False if it can't be evaluated.
+static bool Evaluate(const uint8_t* params, float pitch, float* out) {
+    if (!g_eval) return false;
     alignas(16) uint8_t copy[od::kParamsSize];
     memcpy(copy, params, sizeof(copy));
     SetF(copy, od::pDistMul, 1.f);
     memset(copy + od::pDefault, 0, 12);
-    memset(copy + od::pXCurve, 0, 8);
-    alignas(16) float out[4] = {};
     __try {
-        g_eval(out, copy, 0.f);
+        g_eval(out, copy, pitch);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0.f;
+        return false;
     }
-    const float d = sqrtf(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
-    return d > 0.01f && d < 1000.f ? d : 0.f;
+    return true;
+}
+
+static Measure MeasureSet(const uint8_t* params) {
+    Measure m;
+    alignas(16) float out[4] = {};
+    if (!Evaluate(params, 0.f, out)) return m;
+    const float d = sqrtf(out[1] * out[1] + out[2] * out[2]);
+    if (d > 0.01f && d < 1000.f && fabsf(out[0]) < 100.f) {
+        m.dist = d;
+        m.side = out[0];
+    }
+    return m;
 }
 
 struct MeasuredSet {
     uint32_t id;
-    float dist;
+    Measure m;
 };
-static MeasuredSet g_dists[64];
-static int g_distCount = 0;
+static MeasuredSet g_measured[64];
+static int g_measuredCount = 0;
 
-static float KnownDistance(uint32_t id) {
-    for (int i = 0; i < g_distCount && i < 64; ++i)
-        if (g_dists[i].id == id) return g_dists[i].dist;
-    return 0.f;
+static Measure KnownMeasure(uint32_t id) {
+    for (int i = 0; i < g_measuredCount && i < 64; ++i)
+        if (g_measured[i].id == id) return g_measured[i].m;
+    return Measure();
 }
 
-static float DistanceOf(int32_t set, const uint8_t* params) {  // measured once per set
-    for (int i = 0; i < g_distCount && i < 64; ++i)
-        if (g_dists[i].id == (uint32_t)set) return g_dists[i].dist;
-    const float d = MeasureDistance(params);
-    g_dists[g_distCount++ % 64] = {(uint32_t)set, d};
-    return d;
+static Measure MeasureOf(int32_t set, const uint8_t* params) {  // measured once per set
+    for (int i = 0; i < g_measuredCount && i < 64; ++i)
+        if (g_measured[i].id == (uint32_t)set) return g_measured[i].m;
+    const Measure m = MeasureSet(params);
+    g_measured[g_measuredCount++ % 64] = {(uint32_t)set, m};
+    return m;
 }
 
 struct UsualCamera {
     bool valid = false;
     int32_t set = -1;
     float raw[kN] = {};
-    float dist = 0;
+    float dist = 0, side = 0;
 };
 static UsualCamera g_usual[16];  // by movement mode
 static int32_t g_framedSet = -1, g_framedFrom = -1;  // diagnostics: the indoor set and the usual set last logged
@@ -385,28 +416,30 @@ static void UsualFraming(Slot& s, int32_t set, float* eff) {
     const int32_t move = *(const int32_t*)(p + od::kMoveMode);
     const int m = move >= 0 && move < 16 ? move : 0;
     const bool special = SpecialPlayerMode(p[od::kPlayerMode]);
-    const float dist = g_eval ? DistanceOf(set, p + od::kTo) : 0.f;
+    const Measure own = g_eval ? MeasureOf(set, p + od::kTo) : Measure();
     if (p[od::kMode] == 0 && p[od::kState] == 0 && !special) {  // a usual set: its framing for this movement
         UsualCamera& u = g_usual[m];
-        u.valid = dist > 0;
+        u.valid = own.dist > 0;
         u.set = set;
         memcpy(u.raw, s.raw, sizeof(u.raw));
-        u.dist = dist;
+        u.dist = own.dist;
+        u.side = own.side;
         g_framedSet = -1;
         return;
     }
     const UsualCamera* u = g_usual[m].valid ? &g_usual[m] : g_usual[0].valid ? &g_usual[0] : nullptr;
     const bool indoors = special || p[od::kState] == kStateIndoor;
-    if (!indoors || !CameraOn() || g_testOverride || !u || !(dist > 0)) {
+    if (!indoors || !CameraOn() || g_testOverride || !u || !(own.dist > 0)) {
         g_framedSet = -1;
         return;
     }
     for (int i = 0; i < kFramed; ++i) eff[i] = u->raw[i];
-    eff[1] = u->raw[1] * u->dist / dist;
+    eff[1] = u->raw[1] * u->dist / own.dist;
+    eff[2] = u->raw[2] + u->side - own.side;  // the usual set's sideways curve, less the indoor set's own
     if (g_cfg.diagnostics && (set != g_framedSet || u->set != g_framedFrom))
         Log("indoors (state %u, player mode 0x%x): set %08x framed like %08x (distance %.3f x%.3f against %.3f x%.3f: "
-            "x%.3f)", p[od::kState], p[od::kPlayerMode], (uint32_t)set, (uint32_t)u->set, dist, s.raw[1], u->dist,
-            u->raw[1], eff[1]);
+            "x%.3f; side curve %+.3f against %+.3f: camera %+.3f)", p[od::kState], p[od::kPlayerMode], (uint32_t)set,
+            (uint32_t)u->set, own.dist, s.raw[1], u->dist, u->raw[1], eff[1], own.side, u->side, eff[2]);
     g_framedSet = set;
     g_framedFrom = u->set;
 }
@@ -419,6 +452,7 @@ bool GetUsualFrame(UsualFrame& f) {
         f.set = (uint32_t)u.set;
         memcpy(f.values, u.raw, sizeof(f.values));
         f.dist = u.dist;
+        f.side = u.side;
     }
     ReleaseSRWLockShared(&g_lock);
     return ok;
@@ -431,6 +465,7 @@ void SetUsualFrame(const UsualFrame& f) {
     u.set = (int32_t)f.set;
     memcpy(u.raw, f.values, sizeof(f.values));
     u.dist = f.dist;
+    u.side = f.side;
     ReleaseSRWLockExclusive(&g_lock);
 }
 
