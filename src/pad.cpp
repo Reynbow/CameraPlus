@@ -2,14 +2,15 @@
 //
 // Reading: Xbox-style pads through XInput and DualSense, DualSense Edge and DualShock 4 pads from their HID input
 // reports (FastTravelPlus's reader, so they work without Steam Input). Both are read-only and shared with the
-// game. This drives the panel button, the panel's own controls and the zoom button, and on PlayStation pads the
-// touchpad zoom (a one-finger swipe up or down; the game only uses the touchpad's press).
+// game. This drives the panel button (or two pressed together), the panel's own controls and the zoom button, and on
+// PlayStation pads the touchpad zoom (a one-finger swipe up or down; the game only uses the touchpad's press).
 //
 // Keeping presses from the game: the game asks about a pad button through two small dispatchers, whatever the pad
 // (0x142975160 "down", 0x1429751a0 "went down this frame"; each forwards to the XInput backend at +0x40 or the
 // second backend at +0x48 of the pad device). We replace both. While the panel is open, and after it closes until
 // every button is let go, they answer "not down". During play (the game not paused) the panel button and the zoom
-// button always answer "not down": they're CameraPlus's; in the pause menu and the map they're the game's. The
+// button always answer "not down": they're CameraPlus's; in the pause menu and the map they're the game's. Two panel
+// buttons are the game's one at a time; while either is down the other answers "not down" (it opens the panel). The
 // analog queries (sticks, triggers as axes) are left alone, so the sticks still move and look while the panel is
 // open.
 //
@@ -41,13 +42,39 @@ std::string PadButtonName(int index) { return index > 0 && index < kPadCount ? k
 uint16_t PadButtonCode(int index) { return index > 0 && index < kPadCount ? kPadCodes[index] : 0; }
 
 static std::atomic<int> g_openButton{kDefaultPanelButton};
+static std::atomic<int> g_openButton2{0};        // pressed together with it (0: the panel button alone)
 static std::atomic<uint32_t> g_hidButtons{0};
+static std::atomic<uint32_t> g_held{0};          // the buttons down at the last poll
 static std::atomic<bool> g_guard{false};         // the panel closed with buttons down: keep them from the game
 
 int PanelButton() { return g_openButton.load(); }
 void SetPanelButton(int index) {
     if (index < 0 || index >= kPadCount) return;
     if (g_openButton.exchange(index) != index) Log("Panel button: %s", index ? kPadButtons[index] : "off");
+}
+int PanelButton2() { return g_openButton2.load(); }
+void SetPanelButton2(int index) {
+    if (index < 0 || index >= kPadCount) return;
+    if (g_openButton2.exchange(index) != index) Log("Panel button 2: %s", index ? kPadButtons[index] : "none");
+}
+
+// Either one set alone is a single panel button; the same button twice is one.
+int PanelButtonOne() {
+    const int a = g_openButton.load();
+    return a ? a : g_openButton2.load();
+}
+int PanelButtonTwo() {
+    const int a = g_openButton.load(), b = g_openButton2.load();
+    return a && b != a ? b : 0;
+}
+static uint32_t PanelMask() {  // the panel buttons as bits (0: none)
+    const int one = PanelButtonOne(), two = PanelButtonTwo();
+    return (one ? Bit(one) : 0) | (two ? Bit(two) : 0);
+}
+std::string PanelButtonsName() {
+    const int one = PanelButtonOne(), two = PanelButtonTwo();
+    if (!one) return "off";
+    return two ? std::string(kPadButtons[one]) + " + " + kPadButtons[two] : kPadButtons[one];
 }
 
 // ---- the game's pause flag ----
@@ -94,8 +121,14 @@ bool PadBlockInstalled() { return g_blockInstalled; }
 static bool Blocked(uint16_t code) {
     if (PanelOpen() || g_guard.load()) return true;
     if (GamePaused()) return false;
-    const uint16_t open = PadButtonCode(g_openButton.load()), zoom = PadButtonCode(ZoomButton());
-    return (open && code == open) || (zoom && code == zoom);
+    const uint16_t zoom = PadButtonCode(ZoomButton());
+    if (zoom && code == zoom) return true;
+    const int one = PanelButtonOne(), two = PanelButtonTwo();
+    if (!two) return one && code == PadButtonCode(one);
+    const uint32_t held = g_held.load();
+    if (code == PadButtonCode(one)) return (held & Bit(two)) != 0;
+    if (code == PadButtonCode(two)) return (held & Bit(one)) != 0;
+    return false;
 }
 
 static bool HookDown(void* sys, uint8_t* dev, uint64_t code, uint64_t flags) {
@@ -456,9 +489,11 @@ static bool GameHasFocus() {
 // ---- the panel's controller ----
 // D-pad up/down picks a row and left/right changes it (held: repeats; with LB held: finer steps), A selects, X puts
 // the row back to the game's value, Y hides or shows the list of buttons, B closes. The panel button opens it during play; pressed again it closes the
-// panel, unless it's one of those controls. While the panel waits for a zoom button, the next button is it (B
-// cancels).
+// panel, unless it's one of those controls. Two panel buttons do it pressed together, in either order (the one
+// pressed second does it). While the panel waits for a zoom button, the next button is it (B cancels).
 struct Repeat { ULONGLONG since = 0, last = 0; };
+static const uint32_t kPanelControls = Bit(kUp) | Bit(kDown) | Bit(kLeft) | Bit(kRight) | Bit(kA) | Bit(kX) | Bit(kY) |
+                                       Bit(kB) | Bit(kLB);
 
 // The buttons held as the panel opened: ignored until they're let go. The panel button is D-pad Left by default, which
 // also changes the selected row's value; still held on the next poll, its repeat (timed from a stale start) changed the
@@ -468,11 +503,13 @@ static bool g_wasOpen = false;
 
 static void PanelTick(uint32_t buttons, uint32_t prev, ULONGLONG now, Repeat* rep) {
     uint32_t edge = buttons & ~prev;
-    const int open = g_openButton.load();
+    const uint32_t open = PanelMask();
     const bool paused = GamePaused();
+    // The panel button(s): all down, one of them just pressed.
+    auto pressed = [open](uint32_t down, uint32_t went) { return open && (down & open) == open && (went & open); };
     if (!PanelOpen()) {
         g_wasOpen = false;
-        if (open && (edge & Bit(open)) && !paused) PanelToggleFromPad();
+        if (pressed(buttons, edge) && !paused) PanelToggleFromPad();
         if (!PanelOpen()) return;
     }
     if (!g_wasOpen) {  // just opened (by this button, or the keyboard): what's held now waits for a new press
@@ -481,6 +518,7 @@ static void PanelTick(uint32_t buttons, uint32_t prev, ULONGLONG now, Repeat* re
         for (int i = 0; i < 4; ++i) rep[i] = Repeat();
         return;
     }
+    const uint32_t down = buttons;  // with what's still held from the opening (a held panel button counts to close)
     g_swallow &= buttons;  // let go: counts again
     buttons &= ~g_swallow;
     edge &= ~g_swallow;
@@ -515,9 +553,7 @@ static void PanelTick(uint32_t buttons, uint32_t prev, ULONGLONG now, Repeat* re
     if (edge & Bit(kX)) PanelPadKey(VK_DELETE, fine);
     if (edge & Bit(kY)) PanelPadKey('I', fine);  // the list of buttons on the right
     if (edge & Bit(kB)) PanelPadKey(VK_ESCAPE, fine);
-    const bool navButton = open == kUp || open == kDown || open == kLeft || open == kRight || open == kA ||
-                           open == kX || open == kY || open == kB || open == kLB;
-    if (open && !navButton && (edge & Bit(open)) && PanelOpen()) PanelToggleFromPad();
+    if (!(open & kPanelControls) && pressed(down, edge) && PanelOpen()) PanelToggleFromPad();
 }
 
 static DWORD WINAPI PadThread(void*) {
@@ -555,6 +591,7 @@ static DWORD WINAPI PadThread(void*) {
 
 // One poll's work (the tests call it with made-up buttons).
 void PadPoll(uint32_t buttons, uint32_t prev, ULONGLONG now, void* repeat, bool& wasZoom) {
+    g_held = buttons;
     PanelTick(buttons, prev, now, (Repeat*)repeat);
     // After the panel closes, the buttons still down stay the game's-blind until they're all let go.
     if (PanelOpen()) g_guard = true;
@@ -573,8 +610,7 @@ void StartPad() {
     if (h) CloseHandle(h);
     h = CreateThread(nullptr, 0, HidThread, nullptr, 0, nullptr);
     if (h) CloseHandle(h);
-    const int open = g_openButton.load();
-    Log("Controller: panel button %s, zoom button %s (XInput %s)", open ? kPadButtons[open] : "off",
+    Log("Controller: panel button %s, zoom button %s (XInput %s)", PanelButtonsName().c_str(),
         ZoomButton() ? kPadButtons[ZoomButton()] : "none", g_xinputGetState ? "ready" : "missing");
 }
 

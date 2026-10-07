@@ -17,6 +17,9 @@
      "description": "Opens and closes the CameraPlus panel, where you set up the exploration, indoor, combat, zoom and idle cameras.\n\nThe game doesn't see this key. The default is F1."},
     {"id": "panel_pad", "type": "key", "device": "pad", "default": 270, "context": "gameplay", "conflict": "warn",
      "label": "Panel button",
-     "description": "Opens the CameraPlus panel with a controller.\n\nWhile the panel is open, the D-pad chooses and changes, A selects, X sets the game's value, B closes and holding LB makes finer steps. The game doesn't see controller buttons then, but the sticks still move and look around.\n\nDuring play the game doesn't see this button; in the pause menu and the map it's the game's. The default is D-pad Left."}
+     "description": "Opens the CameraPlus panel with a controller.\n\nWhile the panel is open, the D-pad chooses and changes, A selects, X sets the game's value, B closes and holding LB makes finer steps. The game doesn't see controller buttons then, but the sticks still move and look around.\n\nDuring play the game doesn't see this button; in the pause menu and the map it's the game's. With Panel button 2 set, the two open the panel together instead. The default is D-pad Left."},
+    {"id": "panel_pad2", "type": "key", "device": "pad", "default": 0, "context": "gameplay", "conflict": "warn",
+     "label": "Panel button 2",
+     "description": "Optional: a second button for a two-button combo. The panel opens when both panel buttons are pressed together, in either order, and each one alone stays the game's.\n\nNone: the panel button alone opens the panel. The default is None."}
   ]
 }

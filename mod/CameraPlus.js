@@ -11,7 +11,7 @@
     var DIAG = !!C.diagnostics;
     var URL = 'coui://base/__cameraplus__.json';
     var LOG_URL = 'coui://base/__cameraplus_log__.json';
-    var MOD_ID = 'cameraplus', KEY_OPTION = 'panel_hotkey', PAD_OPTION = 'panel_pad';
+    var MOD_ID = 'cameraplus', KEY_OPTION = 'panel_hotkey', PAD_OPTION = 'panel_pad', PAD2_OPTION = 'panel_pad2';
     var OPEN_MS = 50, CLOSED_MS = 150;  // how often the status is read, with the panel open / closed
     var YELLOW = '#fbe732';             // the game's objective yellow (RadarPlus uses it too)
     var V = function (px) { return (px / 10.8).toFixed(5) + 'vh'; };  // 1080p pixels to vh
@@ -111,7 +111,7 @@
             here.push([['Y'], 'Hide this list'], [['B'], 'Close']);
             if (s.zoomButton) play.push([[s.zoomButton], s.zoomToggle ? 'Zoom on / off' : 'Zoom (hold)']);
             if (s.touch) play.push([['Touchpad'], 'Swipe: camera closer / further']);
-            if (s.button) play.push([[s.button], 'Open this panel']);
+            if (s.button) play.push([s.button2 ? [s.button, { w: '+' }, s.button2] : [s.button], 'Open this panel']);
         } else {
             here = [[['Up', 'Down'], 'Choose a setting'],
                 [['Left', 'Right'], 'Change it'],
@@ -181,7 +181,7 @@
     }
 
     // ---------------------------------------------------------------- the MODS page
-    // The panel key and button are Mod Settings Menu key options (1.7.1): it shows the key's name or the button's icon
+    // The panel key and buttons are Mod Settings Menu key options (1.7.1): it shows the key's name or the button's icon
     // and keeps their codes (window.CMM.value). A change made there reaches the DLL with the next status reads, until
     // the DLL reports it. Only changes: the first codes the menu gives can come from before the DLL moved an old slider
     // choice over, and the DLL has the saved ones already.
@@ -192,15 +192,17 @@
         return typeof v === 'number' && isFinite(v) ? Math.round(v) : null;
     }
     function menuParams() {
-        var k = menuCode(KEY_OPTION), p = menuCode(PAD_OPTION), q = '';
+        var k = menuCode(KEY_OPTION), p = menuCode(PAD_OPTION), p2 = menuCode(PAD2_OPTION), q = '';
         if (!seen) {
-            if (k === null && p === null) return '';
-            seen = { key: k, pad: p };
+            if (k === null && p === null && p2 === null) return '';
+            seen = { key: k, pad: p, pad2: p2 };
         }
         if (k !== null && k !== seen.key) want.key = seen.key = k;
         if (p !== null && p !== seen.pad) want.pad = seen.pad = p;
+        if (p2 !== null && p2 !== seen.pad2) want.pad2 = seen.pad2 = p2;
         if (want.key !== undefined) q += '&pk=' + want.key;
         if (want.pad !== undefined) q += '&pp=' + want.pad;
+        if (want.pad2 !== undefined) q += '&pp2=' + want.pad2;
         return q;
     }
 
@@ -231,6 +233,7 @@
                     s = JSON.parse(x.responseText);
                     if (s.panelKey === want.key) delete want.key;
                     if (s.panelPad === want.pad) delete want.pad;
+                    if (s.panelPad2 === want.pad2) delete want.pad2;
                     render(s);
                 } catch (e) { log('render: ' + e); }
                 next(!!(s && s.open));

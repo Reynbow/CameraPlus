@@ -285,7 +285,7 @@ void PanelCapturePad(int button, bool cancel) {
         g_capture = false;
     } else if (g_captureWhat == kCapturePad) {
         g_capture = false;
-        if (button != PanelButton()) SetZoomButton(button);  // the panel button can't also zoom
+        if (button != PanelButton() && button != PanelButton2()) SetZoomButton(button);  // a panel button can't also zoom
     }
     Bump();
 }
@@ -521,7 +521,7 @@ static DWORD WINAPI WatchWindow(void*) {
                     wchar_t cls[128] = {};
                     GetClassNameW(c.best, cls, 128);
                     Log("Panel ready on window %p (%s): %s or %s opens it", c.best, Utf8(cls).c_str(),
-                        Utf8(g_cfg.panelKeyName).c_str(), PanelButton() ? PadButtonName(PanelButton()).c_str() : "no button");
+                        Utf8(g_cfg.panelKeyName).c_str(), PanelButtonOne() ? PanelButtonsName().c_str() : "no button");
                     g_hwnd = c.best;
                 }
             }
@@ -537,7 +537,7 @@ void StartPanel() {
 
 // ---- the endpoint ----
 // Every status read may carry the HUD's combat flag (c) and a change on the MODS page's key options (pk: the panel
-// key's code, pp: the panel button's code).
+// key's code, pp and pp2: the panel buttons' codes).
 std::string PanelAction(const std::string& action, const char* query) {
     std::string c, k, b;
     if (QueryParam(query, "c", c)) ReportCombat(c == "1");
@@ -546,15 +546,21 @@ std::string PanelAction(const std::string& action, const char* query) {
         const int code = atoi(b.c_str());
         if (ValidPadCode(code)) SetPanelButton(PadIndexOf(code));
     }
+    if (QueryParam(query, "pp2", b) && !b.empty()) {
+        const int code = atoi(b.c_str());
+        if (ValidPadCode(code)) SetPanelButton2(PadIndexOf(code));
+    }
     Locked l;
     std::string s = "{\"ok\":true,\"version\":\"" CP_VERSION "\",\"serial\":";
     s += std::to_string(g_serial);
     s += ",\"open\":";
     s += g_open ? "true" : "false";
-    s += ",\"panelKey\":" + std::to_string(g_cfg.panelKey) + ",\"panelPad\":" + std::to_string(PadCodeOf(PanelButton()));
+    s += ",\"panelKey\":" + std::to_string(g_cfg.panelKey) + ",\"panelPad\":" + std::to_string(PadCodeOf(PanelButton())) +
+         ",\"panelPad2\":" + std::to_string(PadCodeOf(PanelButton2()));
     if (action != "status" || !g_open) return s + "}";
     s += ",\"sel\":" + std::to_string(g_sel) + ",\"key\":\"" + JsonEscape(Utf8(g_cfg.panelKeyName)) + "\"";
-    s += ",\"button\":\"" + JsonEscape(PadButtonName(PanelButton())) + "\",\"pad\":" + (g_lastPad ? "true" : "false");
+    s += ",\"button\":\"" + JsonEscape(PadButtonName(PanelButtonOne())) + "\",\"button2\":\"" +
+         JsonEscape(PadButtonName(PanelButtonTwo())) + "\",\"pad\":" + (g_lastPad ? "true" : "false");
     s += ",\"edit\":\"" + JsonEscape(ViewName(g_edit)) + "\",\"capture\":" + (g_capture ? "true" : "false");
     // For the list of keys: what's bound, and what's on.
     s += ",\"keyList\":" + std::string(KeyListShown() ? "true" : "false");
@@ -573,13 +579,14 @@ std::string PanelAction(const std::string& action, const char* query) {
     return s;
 }
 
-// The script's first values: its version, and the panel key's and button's codes.
+// The script's first values: its version, and the panel key's and buttons' codes.
 std::string BuildConfigJs() {
     std::string js = "window.__CameraPlusConfig={version:\"" CP_VERSION "\",diagnostics:";
     js += g_cfg.diagnostics ? "1" : "0";
     js += ",hook:";
     js += CameraHookInstalled() ? "1" : "0";
-    js += ",panelKey:" + std::to_string(g_cfg.panelKey) + ",panelPad:" + std::to_string(PadCodeOf(PanelButton())) + "};";
+    js += ",panelKey:" + std::to_string(g_cfg.panelKey) + ",panelPad:" + std::to_string(PadCodeOf(PanelButton())) +
+          ",panelPad2:" + std::to_string(PadCodeOf(PanelButton2())) + "};";
     return js;
 }
 

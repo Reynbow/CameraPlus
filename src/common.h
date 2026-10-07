@@ -76,6 +76,12 @@ std::string PadButtonName(int index);  // "" for 0
 uint16_t PadButtonCode(int index);     // the game's code for it (0 for none)
 int PanelButton();
 void SetPanelButton(int index);
+// A second panel button (0: none): set, the two open the panel pressed together, and each alone is the game's.
+int PanelButton2();
+void SetPanelButton2(int index);
+int PanelButtonOne();  // the panel buttons as the panel lists them: the first one set (0: none)
+int PanelButtonTwo();  // and the one pressed with it (0: a single button)
+std::string PanelButtonsName();  // "D-pad Left", "LB (L1) + D-pad Left", or "off"
 bool GamePaused();                     // the game's pause flag (the pause menu, the map...)
 bool PauseKnown();                     // the pause flag was found (else GamePaused() is always false)
 bool FindPausedFlag(const Image& img, uint32_t blend, uint32_t& slotRva);

@@ -101,7 +101,8 @@ static void UseKey(Config& c, int vk) {
 }
 
 // The panel key and button: the MODS page's key options first (or their old sliders, moved over), then
-// CameraPlus.ini (PanelKey= a key name, PanelButton= a place in the controller list), then F1 and D-pad Left.
+// CameraPlus.ini (PanelKey= a key name, PanelButton= a place in the controller list), then F1 and D-pad Left. A second
+// panel button (pressed together with the first) the same way: panel_pad2, PanelButton2=, none.
 void LoadConfig() {
     BuildKeyList();
     Config c;
@@ -135,6 +136,16 @@ void LoadConfig() {
         if (button < 0 || button >= PadButtonCount()) button = kDefaultPanelButton;
     }
     SetPanelButton(button);
+    const int code2 = ReadMenuValue(L"panel_pad2");
+    int button2 = 0;
+    if (code2 >= 0 && ValidPadCode(code2)) {
+        button2 = PadIndexOf(code2);
+    } else {
+        std::wstring b = ReadString(L"CameraPlus", L"PanelButton2");
+        button2 = b.empty() ? 0 : _wtoi(b.c_str());
+        if (button2 < 0 || button2 >= PadButtonCount()) button2 = 0;
+    }
+    SetPanelButton2(button2);
     g_cfg = c;
     LoadViews();
 }
